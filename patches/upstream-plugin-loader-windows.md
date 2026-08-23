@@ -2,29 +2,49 @@
 
 Applies to Paperclip v2026.817.0 (`@paperclipai/server/dist/adapters/plugin-loader.js`).
 
-## Local hotfix (dormant until the next server restart)
+## Complete runbook (patch + install, ~2 min, one restart whenever suits you)
 
-The running process keeps the broken module in memory; patching the files on
-disk changes nothing until restart. After any restart, retry
-`POST /api/adapters/install` (or the Adapter Manager UI) and it works.
-
-Apply to the installed copy:
+Step 1 - patch the installed loader copy (safe any time; dormant until restart):
 
 ```powershell
 $f = "$env:USERPROFILE\AppData\Local\npm-cache\_npx\43414d9b790239bb\node_modules\@paperclipai\server\dist\adapters\plugin-loader.js"
-# 1. add import
-(Get-Content $f -Raw) `
-  -replace 'import fs from "node:fs";', "import fs from `"node:fs`";`r`nimport { pathToFileURL } from `"node:url`";" `
-  | Set-Content $f -NoNewline
-# 2. fix load path
-(Get-Content $f -Raw) -replace 'await import\(modulePath\)', 'await import(pathToFileURL(modulePath).href)' | Set-Content $f -NoNewline
-# 3. fix reload cache-bust URL base
-(Get-Content $f -Raw) -replace 'const fileUrl = `file://\$\{modulePath\}`;', 'const fileUrl = pathToFileURL(modulePath).href;' | Set-Content $f -NoNewline
+Copy-Item $f "$f.bak"
+$c = Get-Content $f -Raw
+$c = $c -replace 'import fs from "node:fs";', ('import fs from "node:fs";' + "`r`n" + 'import { pathToFileURL } from "node:url";')
+$c = $c -replace 'await import\(modulePath\)', 'await import(pathToFileURL(modulePath).href)'
+$c = $c -replace 'const fileUrl = `file://\$\{modulePath\}`;', 'const fileUrl = pathToFileURL(modulePath).href;'
+Set-Content $f $c -NoNewline
+Select-String -Path $f -Pattern "pathToFileURL"   # expect 3 hits
 ```
 
-A backup of the original is kept at `plugin-loader.js.orig-windows-bug`.
-The npx cache may be replaced when paperclipai is upgraded or its cache is
-pruned - re-apply (or upgrade to a version containing the upstream fix).
+Step 2 - restart Paperclip at your leisure (this is the only downtime).
+
+Step 3 - install the adapter (no rebuild needed; repo already built):
+
+```powershell
+$body = @{ packageName = "C:\Users\darre\projects\paperclip-adapter-openrouter"; isLocalPath = $true } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://127.0.0.1:3100/api/adapters/install" -Method POST -ContentType "application/json" -Body $body
+# expect: type=openrouter, requiresRestart=false
+```
+
+Or via UI: Settings -> Instance -> Adapters -> Install Adapter -> Local path.
+
+Step 4 - verify:
+
+```powershell
+(Invoke-RestMethod "http://127.0.0.1:3100/api/adapters") | Where-Object type -eq "openrouter"
+```
+
+Then hire an agent with adapter type OpenRouter and set its API key
+(config `apiKey`, a `{{SECRET_REF}}`, or server env `OPENROUTER_API_KEY`).
+
+Notes:
+- The npx cache dir (`43414d9b790239bb`) changes when paperclipai is upgraded
+  or pruned - re-locate the file via
+  `Get-ChildItem "$env:USERPROFILE\AppData\Local\npm-cache\_npx" -Recurse -Filter plugin-loader.js`
+  and re-apply (or skip entirely once upstream ships the fix).
+- If the POST reports `requiresRestart: true` you re-installed over an
+  existing record; one more restart picks it up.
 
 ## Upstream report draft
 
