@@ -36,6 +36,9 @@
   "paperclip": {
     "adapterUiParser": "1.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "ui-parser.cjs",
