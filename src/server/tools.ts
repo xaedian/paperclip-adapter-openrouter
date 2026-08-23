@@ -13,6 +13,7 @@
  */
 
 import { PaperclipApi, PaperclipApiError } from "./paperclip-api.js";
+import { PAPERCLIP_AGENT_ROLES, PAPERCLIP_ISSUE_PRIORITIES, PAPERCLIP_ISSUE_STATUSES } from "../index.js";
 
 export interface ToolSchema {
   type: "function";
@@ -112,17 +113,22 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
       function: {
         name: "update_issue_status",
         description:
-          "Move an issue to a new status. Valid statuses: open, in_progress, blocked, done, cancelled. " +
-          "Defaults to the current issue.",
+          "Move an issue to a new status. Valid statuses: " +
+          PAPERCLIP_ISSUE_STATUSES.join(", ") +
+          ". Defaults to the current issue.",
         parameters: {
           type: "object",
           properties: {
             issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
             status: {
               type: "string",
-              enum: ["open", "in_progress", "blocked", "done", "cancelled"],
+              enum: [...PAPERCLIP_ISSUE_STATUSES],
             },
-            reason: { type: "string", description: "Optional explanation." },
+            reason: {
+              type: "string",
+              description:
+                "Optional explanation. When provided it is posted as a comment alongside the status change.",
+            },
           },
           required: ["status"],
         },
@@ -133,9 +139,22 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
       if (!id) return fail("No issue_id supplied and no current issue.");
       const status = asString(args.status);
       if (!status) return fail("status is required.");
-      return safeCall("update_issue_status", () =>
-        ctx.api.updateIssue(id, { status, statusReason: args.reason ?? null }),
+      if (!(PAPERCLIP_ISSUE_STATUSES as readonly string[]).includes(status)) {
+        return fail(`Invalid status "${status}". Valid: ${PAPERCLIP_ISSUE_STATUSES.join(", ")}`);
+      }
+      const result = await safeCall("update_issue_status", () =>
+        ctx.api.updateIssue(id, { status }),
       );
+      // Post the reason as a comment so the explanation is visible in-thread.
+      const reason = asString(args.reason);
+      if (!result.isError && reason) {
+        try {
+          await ctx.api.addIssueComment(id, { body: `Status set to "${status}": ${reason}` });
+        } catch {
+          // Non-fatal - the status update already succeeded.
+        }
+      }
+      return result;
     },
   };
 }
@@ -208,7 +227,7 @@ function createSubIssueTool(ctx: BuildToolsContext): Tool {
             title: { type: "string" },
             description: { type: "string" },
             assignee_agent_id: { type: "string", description: "Optional agent id to assign to." },
-            priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
+            priority: { type: "string", enum: [...PAPERCLIP_ISSUE_PRIORITIES] },
           },
           required: ["title"],
         },
@@ -251,7 +270,7 @@ function listIssuesTool(ctx: BuildToolsContext): Tool {
       const query: Record<string, string> = {};
       if (typeof args.status === "string") query.status = args.status;
       if (typeof args.assignee_agent_id === "string") query.assigneeAgentId = args.assignee_agent_id;
-      query.limit = String(typeof args.limit === "number" ? args.limit : 20);
+      query.limit = String(Math.min(Math.max(typeof args.limit === "number" ? Math.floor(args.limit) : 20, 1), 50));
       return safeCall("list_issues", () => ctx.api.listCompanyIssues(ctx.companyId, query));
     },
   };
@@ -270,33 +289,49 @@ function hireAgentTool(ctx: BuildToolsContext): Tool {
           type: "object",
           properties: {
             name: { type: "string" },
-            role: { type: "string", description: "Job title, e.g. 'Senior Engineer'." },
-            mission: { type: "string", description: "What this agent is responsible for." },
+            role: {
+              type: "string",
+              enum: [...PAPERCLIP_AGENT_ROLES],
+              description: "Company role. Defaults to 'general'.",
+            },
+            title: { type: "string", description: "Job title, e.g. 'Senior Engineer'." },
+            capabilities: { type: "string", description: "What this agent is responsible for." },
             adapter_type: {
               type: "string",
-              description: "Adapter to use, e.g. 'openrouter', 'claude_local'.",
+              description: "Adapter for the new agent, e.g. 'openrouter', 'claude_local'. Default 'openrouter'.",
               default: "openrouter",
             },
-            model: { type: "string", description: "Model id, e.g. 'stepfun/step-3.5-flash:free'." },
-            reports_to_agent_id: { type: "string", description: "Manager agent id." },
+            model: { type: "string", description: "Model id for the new agent, e.g. 'openai/gpt-4o-mini'." },
+            reports_to_agent_id: { type: "string", description: "Manager agent id (uuid)." },
           },
-          required: ["name", "role", "mission"],
+          required: ["name"],
         },
       },
     },
     execute: async (args) => {
-      const payload: Record<string, unknown> = {
-        name: args.name,
-        role: args.role,
-        mission: args.mission,
-        adapterType: args.adapter_type ?? "openrouter",
-        model: args.model,
-        reportsToAgentId: args.reports_to_agent_id,
-        requestedByAgentId: ctx.agentId,
+      const name = asString(args.name);
+      if (!name) return fail("name is required.");
+
+      const role = asString(args.role, "general");
+      if (!(PAPERCLIP_AGENT_ROLES as readonly string[]).includes(role)) {
+        return fail(`Invalid role "${role}". Valid: ${PAPERCLIP_AGENT_ROLES.join(", ")}`);
+      }
+
+      // Shape expected by POST /api/companies/:companyId/agent-hires
+      // (createAgentHireSchema = createAgentSchema + sourceIssueIds).
+      const hirePayload: Record<string, unknown> = {
+        name,
+        role,
+        title: asString(args.title) || undefined,
+        capabilities: asString(args.capabilities) || undefined,
+        adapterType: asString(args.adapter_type, "openrouter"),
+        adapterConfig: args.model ? { model: asString(args.model) } : {},
+        reportsTo: asString(args.reports_to_agent_id) || null,
+        ...(ctx.currentIssueId ? { sourceIssueId: ctx.currentIssueId } : {}),
       };
 
       if (ctx.autoApprove) {
-        return safeCall("hire_agent", () => ctx.api.hireAgent(ctx.companyId, payload));
+        return safeCall("hire_agent", () => ctx.api.hireAgent(ctx.companyId, hirePayload));
       }
 
       // Default path: route through approvals so a human signs off.
@@ -304,7 +339,7 @@ function hireAgentTool(ctx: BuildToolsContext): Tool {
         ctx.api.createApproval(ctx.companyId, {
           type: "hire_agent",
           requestedByAgentId: ctx.agentId,
-          payload: { ...payload, summary: `Hire ${args.name} as ${args.role}` },
+          payload: { ...hirePayload, summary: `Hire ${name}${hirePayload.title ? ` as ${hirePayload.title}` : ""}` },
         }),
       );
     },
@@ -354,17 +389,16 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
       function: {
         name: "request_approval",
         description:
-          "Open an approval request for an action that requires human sign-off. " +
-          "Only three types are currently supported by Paperclip: hire_agent, " +
-          "approve_ceo_strategy, budget_override_required. For hiring, prefer the " +
+          "Open an approval request for an action that requires human sign-off. Supported types: hire_agent, " +
+          "approve_ceo_strategy, budget_override_required, request_board_approval. For hiring, prefer the " +
           "dedicated hire_agent tool instead.",
         parameters: {
           type: "object",
           properties: {
             type: {
               type: "string",
-              enum: ["hire_agent", "approve_ceo_strategy", "budget_override_required"],
-              description: "Approval type — must be one of the three supported values.",
+              enum: ["hire_agent", "approve_ceo_strategy", "budget_override_required", "request_board_approval"],
+              description: "Approval type.",
             },
             summary: { type: "string", description: "One-line summary for the operator." },
             payload: { type: "object", description: "Structured payload describing the action." },

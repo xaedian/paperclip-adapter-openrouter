@@ -1,52 +1,181 @@
 /**
- * Server barrel for the OpenRouter adapter.
+ * Server module for the OpenRouter adapter.
  *
- * Exposes everything Paperclip's server-side registry expects from a
- * fully-featured adapter:
- *   - execute             — the agent run loop (tool-calling)
- *   - testEnvironment     — env diagnostics + model fetch
- *   - sessionCodec        — persist/restore lastGenerationId across heartbeats
- *   - detectModel         — read OPENROUTER_MODEL env if present
- *   - listSkills          — minimal stub (filesystem scan)
- *   - syncSkills          — no-op (skills are managed externally)
+ * Exposes createServerAdapter(), the entry point Paperclip's adapter plugin
+ * loader expects (see @paperclipai/server/dist/adapters/plugin-loader.js):
+ * it imports this package's main entry and calls createServerAdapter(),
+ * validating that the returned module has a "type".
  *
- * Optional hooks not implemented (deferred to v3):
- *   - getQuotaWindows     — OpenRouter exposes /key endpoint, can be added
- *   - onHireApproved      — only used by cloud adapters
- *   - getConfigSchema     — UI form fields are still declared in src/ui/build-config.ts
+ * Everything is declared on the module itself — supportsLocalAgentJwt,
+ * config schema, model discovery, skills, session codec — so no Paperclip
+ * source patches are needed on any version that ships the external
+ * adapter plugin store (>= 2026.40x).
  */
 
 import path from "node:path";
 import fs from "node:fs/promises";
 import type {
+  AdapterConfigSchema,
+  AdapterEnvironmentTestResult,
+  AdapterExecutionContext,
+  AdapterExecutionResult,
+  AdapterModel,
   AdapterSessionCodec,
   AdapterSkillContext,
   AdapterSkillSnapshot,
+  ServerAdapterModule,
 } from "@paperclipai/adapter-utils";
 
-export { execute } from "./execute.js";
-export { testEnvironment, listOpenRouterModels } from "./test.js";
+import { agentConfigurationDoc, label, models as fallbackModels, type } from "../index.js";
+import { execute } from "./execute.js";
+import { testEnvironment, listOpenRouterModels } from "./test.js";
 
-// ----- sessionCodec -----
+export { execute };
+export { testEnvironment, listOpenRouterModels };
 
-/**
- * OpenRouter doesn't have first-class server-side sessions; we persist the
- * last generation id so the run viewer can show a stable display id and
- * future versions can chain conversations across heartbeats.
- */
+// ─────────────────────────────────────────────────────────────────
+// Model discovery
+// ─────────────────────────────────────────────────────────────────
+
+/** Cached dynamic models; refreshed by refreshModels() or when stale. */
+let cachedModels: AdapterModel[] | null = null;
+let cachedModelsAt = 0;
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+
+async function loadModels(force: boolean): Promise<AdapterModel[]> {
+  const now = Date.now();
+  if (!force && cachedModels && now - cachedModelsAt < MODEL_CACHE_TTL_MS) {
+    return cachedModels;
+  }
+  const discovered = await listOpenRouterModels();
+  if (discovered.length > 0) {
+    cachedModels = discovered;
+    cachedModelsAt = now;
+    return discovered;
+  }
+  // Discovery failed — fall back to the static list rather than nothing.
+  return cachedModels ?? fallbackModels;
+}
+
+async function listModels(): Promise<AdapterModel[]> {
+  return loadModels(false);
+}
+
+async function refreshModels(): Promise<AdapterModel[]> {
+  return loadModels(true);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Declarative config schema — lets the stock UI render our agent
+// form without shipping any React components.
+// ─────────────────────────────────────────────────────────────────
+
+function getConfigSchema(): AdapterConfigSchema {
+  return {
+    fields: [
+      {
+        key: "model",
+        label: "Model",
+        type: "combobox",
+        required: true,
+        default: "openrouter/auto",
+        hint: "Any OpenRouter model id. \":free\" suffix = free tier; openrouter/auto = let OpenRouter route.",
+        options: fallbackModels.map((m) => ({ label: m.label, value: m.id })),
+      },
+      {
+        key: "apiKey",
+        label: "OpenRouter API key",
+        type: "text",
+        hint: "sk-or-v1-... Leave blank to use OPENROUTER_API_KEY env var, or use a secret ref like {{OPENROUTER_API_KEY}}.",
+      },
+      {
+        key: "instructionsFilePath",
+        label: "Instructions file path",
+        type: "text",
+        hint: "Absolute path to a markdown file used as the system prompt (overrides System prompt).",
+      },
+      {
+        key: "systemPrompt",
+        label: "System prompt",
+        type: "textarea",
+        hint: "Base system prompt prepended to every request.",
+      },
+      {
+        key: "temperature",
+        label: "Temperature",
+        type: "number",
+        default: 0.7,
+        hint: "Sampling temperature 0-2.",
+      },
+      {
+        key: "maxTokens",
+        label: "Max completion tokens",
+        type: "number",
+        default: 4096,
+      },
+      {
+        key: "maxTurns",
+        label: "Max tool-loop turns",
+        type: "number",
+        default: 25,
+        hint: "Maximum model/tool round-trips per run.",
+      },
+      {
+        key: "requestTimeoutSec",
+        label: "Request timeout (sec)",
+        type: "number",
+        default: 300,
+      },
+      {
+        key: "reasoning",
+        label: "Extended thinking",
+        type: "toggle",
+        default: false,
+        hint: "Enable for reasoning-capable models (DeepSeek R1, QwQ, ...).",
+      },
+      {
+        key: "autoApprove",
+        label: "Auto-approve hires",
+        type: "toggle",
+        default: false,
+        hint: "Skip the human approval gate for hire_agent. Keep off in production.",
+      },
+      {
+        key: "route",
+        label: "Provider routing",
+        type: "select",
+        default: "fallback",
+        options: [
+          { label: "Fallback (failover on errors)", value: "fallback" },
+          { label: "No fallback", value: "no-fallback" },
+        ],
+      },
+      {
+        key: "skillsDir",
+        label: "Skills directory",
+        type: "text",
+        hint: "Directory of SKILL.md folders injected into the system prompt. Default ~/.openrouter-adapter/skills",
+      },
+    ],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Session codec — persists lastGenerationId across heartbeats so the
+// run viewer shows a stable display id and future versions can chain
+// conversations.
+// ─────────────────────────────────────────────────────────────────
+
 export const sessionCodec: AdapterSessionCodec = {
   deserialize(raw) {
     if (!raw || typeof raw !== "object") return null;
-    const obj = raw as Record<string, unknown>;
-    const id = typeof obj.lastGenerationId === "string" ? obj.lastGenerationId : null;
-    if (!id) return null;
-    return { lastGenerationId: id };
+    const id = (raw as Record<string, unknown>).lastGenerationId;
+    return typeof id === "string" ? { lastGenerationId: id } : null;
   },
   serialize(params) {
     if (!params || typeof params !== "object") return null;
-    const id = typeof params.lastGenerationId === "string" ? params.lastGenerationId : null;
-    if (!id) return null;
-    return { lastGenerationId: id };
+    const id = (params as Record<string, unknown>).lastGenerationId;
+    return typeof id === "string" ? { lastGenerationId: id } : null;
   },
   getDisplayId(params) {
     if (!params || typeof params !== "object") return null;
@@ -55,13 +184,11 @@ export const sessionCodec: AdapterSessionCodec = {
   },
 };
 
-// ----- detectModel -----
+// ─────────────────────────────────────────────────────────────────
+// detectModel — OpenRouter has no local CLI config to read; the env
+// var is the only meaningful source.
+// ─────────────────────────────────────────────────────────────────
 
-/**
- * Best-effort detection: read OPENROUTER_MODEL or fall back to "openrouter/auto".
- * Other adapters read from on-disk CLI configs; OpenRouter has none, so env
- * is the only meaningful source.
- */
 export async function detectModel(): Promise<{
   model: string;
   provider: string;
@@ -74,16 +201,14 @@ export async function detectModel(): Promise<{
   return { model: "openrouter/auto", provider: "openrouter", source: "default" };
 }
 
-// ----- listSkills / syncSkills -----
+// ─────────────────────────────────────────────────────────────────
+// Skills — ephemeral mode. We scan an operator-managed root
+// (~/.openrouter-adapter/skills by default) and report each subdir
+// containing a SKILL.md as an external skill. Paperclip-managed
+// runtime skills (config.paperclipRuntimeSkills) are additionally
+// injected into the prompt by execute().
+// ─────────────────────────────────────────────────────────────────
 
-/**
- * Minimal skill listing. We scan the same root our skill loader uses
- * (~/.openrouter-adapter/skills by default) and report each subdirectory
- * containing a SKILL.md as an external skill.
- *
- * v1 doesn't track desired-vs-installed because we don't sync from
- * Paperclip's managed skill store yet — that's a v3 feature.
- */
 function defaultSkillsRoot(): string {
   const home = process.env.HOME || process.env.USERPROFILE || ".";
   return path.join(home, ".openrouter-adapter", "skills");
@@ -100,25 +225,22 @@ export async function listSkills(_ctx: AdapterSkillContext): Promise<AdapterSkil
     warnings: [],
   };
 
-  let entries: import("node:fs").Dirent[] = [];
+  let dirents: import("node:fs").Dirent[];
   try {
-    entries = await fs.readdir(root, { withFileTypes: true });
+    dirents = await fs.readdir(root, { withFileTypes: true });
   } catch {
     snapshot.warnings.push(`Skills root ${root} not present.`);
     return snapshot;
   }
 
-  for (const entry of entries) {
+  for (const entry of dirents) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     const skillDir = path.join(root, entry.name);
-    const skillMd = path.join(skillDir, "SKILL.md");
-    let hasSkillMd = true;
     try {
-      await fs.access(skillMd);
+      await fs.access(path.join(skillDir, "SKILL.md"));
     } catch {
-      hasSkillMd = false;
+      continue;
     }
-    if (!hasSkillMd) continue;
     snapshot.entries.push({
       key: entry.name,
       runtimeName: entry.name,
@@ -138,7 +260,33 @@ export async function syncSkills(
   ctx: AdapterSkillContext,
   _desiredSkills: string[],
 ): Promise<AdapterSkillSnapshot> {
-  // v1: skills are managed externally (operator drops them in skillsRoot).
-  // We just return the current listing — no copy/sync work.
+  // Skills are managed externally (operator drops them into the root).
   return listSkills(ctx);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Module assembly
+// ─────────────────────────────────────────────────────────────────
+
+export function createServerAdapter(): ServerAdapterModule & { label: string } {
+  return {
+    type,
+    label,
+    execute: ((ctx: AdapterExecutionContext) =>
+      execute(ctx)) as (ctx: AdapterExecutionContext) => Promise<AdapterExecutionResult>,
+    testEnvironment: (async (ctx): Promise<AdapterEnvironmentTestResult> =>
+      testEnvironment(ctx)),
+    supportsLocalAgentJwt: true,
+    supportsInstructionsBundle: true,
+    instructionsPathKey: "instructionsFilePath",
+    models: fallbackModels,
+    listModels,
+    refreshModels,
+    detectModel,
+    sessionCodec,
+    listSkills,
+    syncSkills,
+    getConfigSchema,
+    agentConfigurationDoc,
+  };
 }

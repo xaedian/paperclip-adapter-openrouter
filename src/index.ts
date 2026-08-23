@@ -1,37 +1,42 @@
 // ─────────────────────────────────────────────────────────────────
-// @paperclipai/adapter-openrouter — Root Metadata (src/index.ts)
-// Shared across server · ui · cli — keep dependency-free
+// OpenRouter adapter for Paperclip — root metadata.
+// Shared across server · cli · ui-parser. Metadata below is dependency-
+// free; createServerAdapter() is re-exported from ./server because
+// Paperclip's plugin loader imports the package MAIN entry and calls it.
 // ─────────────────────────────────────────────────────────────────
+
+export { createServerAdapter } from "./server/index.js";
 
 export const type = "openrouter" as const;
 export const label = "OpenRouter";
 
-// ── Static fallback models (shown when API is unreachable) ──────
+// ── Static fallback models (shown when the API is unreachable) ──
 export const models = [
   // Free tier
-  { id: "openrouter/auto",                       label: "Auto (best free route)" },
+  { id: "openrouter/auto",                        label: "Auto (best route)" },
   { id: "meta-llama/llama-4-maverick:free",       label: "Llama 4 Maverick (free)" },
   { id: "meta-llama/llama-4-scout:free",          label: "Llama 4 Scout (free)" },
   { id: "google/gemma-3-27b-it:free",             label: "Gemma 3 27B (free)" },
   { id: "deepseek/deepseek-chat-v3-0324:free",    label: "DeepSeek V3 0324 (free)" },
   { id: "qwen/qwen3-235b-a22b:free",              label: "Qwen3 235B (free)" },
   { id: "mistralai/mistral-small-3.2-24b-instruct:free", label: "Mistral Small 3.2 (free)" },
+  { id: "openai/gpt-oss-120b:free",               label: "GPT-OSS 120B (free)" },
 
   // Paid — frontier
   { id: "anthropic/claude-sonnet-4-6",            label: "Claude Sonnet 4.6" },
   { id: "anthropic/claude-opus-4-6",              label: "Claude Opus 4.6" },
-  { id: "openai/gpt-4.1",                        label: "GPT-4.1" },
+  { id: "openai/gpt-4.1",                         label: "GPT-4.1" },
   { id: "openai/o4-mini",                         label: "o4-mini" },
-  { id: "google/gemini-2.5-pro-preview",          label: "Gemini 2.5 Pro" },
-  { id: "google/gemini-2.5-flash-preview",        label: "Gemini 2.5 Flash" },
+  { id: "google/gemini-2.5-pro",                  label: "Gemini 2.5 Pro" },
+  { id: "google/gemini-2.5-flash",                label: "Gemini 2.5 Flash" },
   { id: "deepseek/deepseek-r1",                   label: "DeepSeek R1" },
-  { id: "meta-llama/llama-4-maverick",            label: "Llama 4 Maverick" },
 
   // Paid — mid-tier
   { id: "anthropic/claude-haiku-4-5",             label: "Claude Haiku 4.5" },
-  { id: "openai/gpt-4.1-mini",                   label: "GPT-4.1 Mini" },
+  { id: "openai/gpt-4.1-mini",                    label: "GPT-4.1 Mini" },
+  { id: "openai/gpt-4o-mini",                     label: "GPT-4o Mini" },
   { id: "mistralai/mistral-medium-3",             label: "Mistral Medium 3" },
-  { id: "qwen/qwen3-235b-a22b",                  label: "Qwen3 235B" },
+  { id: "qwen/qwen3-235b-a22b",                   label: "Qwen3 235B" },
 ];
 
 // ── OpenRouter API constants ────────────────────────────────────
@@ -40,38 +45,81 @@ export const OPENROUTER_MODELS_ENDPOINT = `${OPENROUTER_BASE_URL}/models`;
 export const OPENROUTER_CHAT_ENDPOINT = `${OPENROUTER_BASE_URL}/chat/completions`;
 export const OPENROUTER_GENERATION_ENDPOINT = `${OPENROUTER_BASE_URL}/generation`;
 
+/** Issue statuses accepted by Paperclip's issue update API. Keep in sync with ISSUE_STATUSES in @paperclipai/shared. */
+export const PAPERCLIP_ISSUE_STATUSES = [
+  "backlog",
+  "todo",
+  "in_progress",
+  "in_review",
+  "blocked",
+  "done",
+  "cancelled",
+] as const;
+
+/** Agent roles accepted by Paperclip's agent hire API. Keep in sync with AGENT_ROLES in @paperclipai/shared. */
+export const PAPERCLIP_AGENT_ROLES = [
+  "ceo",
+  "cto",
+  "cmo",
+  "cfo",
+  "security",
+  "engineer",
+  "designer",
+  "pm",
+  "qa",
+  "devops",
+  "researcher",
+  "general",
+] as const;
+
+/** Priorities accepted by Paperclip's issue create/update API. Keep in sync with ISSUE_PRIORITIES in @paperclipai/shared. */
+export const PAPERCLIP_ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
+
 // ── Adapter documentation ───────────────────────────────────────
-export const agentConfigurationDoc = `# openrouter adapter configuration
+export const agentConfigurationDoc = `# OpenRouter adapter configuration
+
+Access 300+ models (50+ free) from every provider through a single OpenRouter API key,
+with a full multi-turn tool-calling loop against Paperclip's REST API.
 
 ## Use when
-- You want access to 300+ models (free AND paid) from a single API key
-- You want to use OpenRouter's auto-routing for cost-optimized inference
-- You need models not available via native adapters (Llama, Qwen, Mistral, DeepSeek, etc.)
-- You want to compare outputs across multiple providers without separate API keys
+- You want access to many providers/models without separate vendor keys
+- You want free-tier models for cheap or experimental agents
+- You need models not covered by native CLI adapters (Llama, Qwen, Mistral, DeepSeek, ...)
 
 ## Core fields
-- \`model\` (string) — OpenRouter model ID, e.g. "anthropic/claude-sonnet-4-6"
-  Use "openrouter/auto" to let OpenRouter pick the best model automatically.
-  Append ":free" to any model ID for free-tier routing.
-- \`apiKey\` (string) — Your OpenRouter API key (sk-or-v1-...)
-  Can also be set via OPENROUTER_API_KEY env var.
-- \`systemPrompt\` (string, optional) — System prompt prepended to all messages.
-- \`temperature\` (number, optional) — Sampling temperature (0-2). Default: 0.7
-- \`maxTokens\` (number, optional) — Max completion tokens. Default: 4096
-- \`topP\` (number, optional) — Nucleus sampling. Default: 1
-- \`stream\` (boolean, optional) — Enable SSE streaming. Default: true
-- \`reasoning\` (boolean, optional) — Enable extended thinking for supported models.
-- \`transforms\` (string[], optional) — OpenRouter transforms, e.g. ["middle-out"]
-- \`route\` (string, optional) — "fallback" (default) or "no-fallback"
-- \`httpReferer\` (string, optional) — Your app URL for OpenRouter leaderboards
-- \`xTitle\` (string, optional) — Your app name for OpenRouter leaderboards
+- \`model\` (string) — any OpenRouter model id, e.g. "anthropic/claude-sonnet-4-6".
+  "openrouter/auto" lets OpenRouter pick per request; ":free" suffix routes to the free tier.
+- \`apiKey\` (string, secret) — your OpenRouter key (sk-or-v1-...).
+  Recommended: store it as a Paperclip secret and reference it here as {{OPENROUTER_API_KEY}},
+  or leave blank to use the OPENROUTER_API_KEY environment variable on the server.
+
+## Tool loop
+- \`maxTurns\` (number, default 25) — max model/tool round-trips per run
+- \`autoApprove\` (boolean, default false) — skip the human approval gate on hire_agent
+- \`requestTimeoutSec\` (number, default 300) — per-request timeout
+
+## Sampling
+- \`temperature\` (0-2, default 0.7), \`topP\` (default 1), \`maxTokens\` (default 4096)
+- \`reasoning\` (boolean) — extended thinking for reasoning-capable models
+- \`transforms\` (string[]) — OpenRouter transforms, e.g. ["middle-out"]
+- \`route\` ("fallback" | "no-fallback") — provider failover behaviour
+
+## Instructions & skills
+- \`systemPrompt\` (string) — base system prompt
+- \`instructionsFilePath\` (string) — path to a markdown instructions file; overrides systemPrompt
+- \`skillsDir\` (string) — directory of SKILL.md folders injected into the system prompt
 
 ## Don't use when
-- You already have a direct API key for a single provider and only need that one model
-- You need local/offline inference (use ollama or process adapter instead)
-`;
+- You only need one provider and already have its native adapter/key
+- You need local/offline inference
 
+## Environment (server-side)
+- OPENROUTER_API_KEY — fallback when apiKey config is empty
+- PAPERCLIP_AGENT_JWT_SECRET — host-side; lets Paperclip mint the agent JWT this adapter
+  uses for its tool calls (supportsLocalAgentJwt is enabled by default)
+`;
 // ── Types ───────────────────────────────────────────────────────
+
 export interface OpenRouterModel {
   id: string;
   name: string;
@@ -86,22 +134,17 @@ export interface OpenRouterModel {
     max_completion_tokens?: number;
     is_moderated?: boolean;
   };
-  per_request_limits?: Record<string, string> | null;
-  architecture?: {
-    modality: string;
-    tokenizer: string;
-    instruct_type: string | null;
-  };
 }
 
 export interface OpenRouterConfig {
-  model: string;
+  /** Any OpenRouter model id. Default "openrouter/auto". */
+  model?: string;
+  /** OpenRouter API key. Falls back to OPENROUTER_API_KEY env var. Supports Paperclip secret refs like {{OPENROUTER_API_KEY}}. */
   apiKey?: string;
   systemPrompt?: string;
   temperature?: number;
   maxTokens?: number;
   topP?: number;
-  stream?: boolean;
   reasoning?: boolean;
   transforms?: string[];
   route?: "fallback" | "no-fallback";
@@ -109,12 +152,12 @@ export interface OpenRouterConfig {
   xTitle?: string;
   /** Max tool-loop turns per run. Default 25. */
   maxTurns?: number;
-  /** Skip approval gates for hire_agent and similar mutating tools. Default false. */
+  /** Skip approval gates for hire_agent. Default false. */
   autoApprove?: boolean;
-  /** Override path to skills directory. Defaults to ~/.openrouter-adapter/skills. */
+  /** Per-request timeout seconds. Default 300. */
+  requestTimeoutSec?: number;
+  /** Override path to skills directory. Default ~/.openrouter-adapter/skills */
   skillsDir?: string;
-  /** Absolute path to a markdown file that will be read at runtime and
-   * prepended to the system prompt. Takes precedence over systemPrompt
-   * if both are set. */
+  /** Absolute path to a markdown file read at runtime and used as the system prompt (overrides systemPrompt). */
   instructionsFilePath?: string;
 }

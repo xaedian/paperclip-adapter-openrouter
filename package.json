@@ -1,29 +1,60 @@
 {
-  "name": "paperclip-adapter-openrouter-talha",
-  "version": "1.0.0",
-  "description": "OpenRouter adapter for Paperclip — access 300+ AI models (free & paid) via a single API key",
+  "name": "@xaedian/paperclip-adapter-openrouter",
+  "version": "2.0.0",
+  "description": "OpenRouter adapter for Paperclip - 300+ AI models (free & paid) via a single API key. External adapter plugin, no Paperclip source patches required.",
   "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/server/index.ts",
-    "./ui": "./src/ui/index.ts",
-    "./cli": "./src/cli/index.ts"
+  "author": "xaedian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xaedian/paperclip-adapter-openrouter"
   },
+  "keywords": [
+    "paperclip",
+    "openrouter",
+    "ai-agent",
+    "adapter",
+    "orchestration"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "import": "./dist/cli/index.js"
+    },
+    "./ui-parser": "./ui-parser.cjs"
+  },
+  "paperclip": {
+    "adapterUiParser": "1.0.0"
+  },
+  "files": [
+    "dist",
+    "ui-parser.cjs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@paperclipai/adapter-utils": "workspace:*",
-    "@paperclipai/shared": "workspace:*"
+    "@paperclipai/adapter-utils": "^2026.817.0"
   },
   "devDependencies": {
-    "@types/node": "^25.5.2",
-    "picocolors": "^1.1.1",
-    "typescript": "^5.5.0"
+    "@types/node": "^22.20.1",
+    "typescript": "^5.7.3"
   },
-  "peerDependencies": {
-    "picocolors": "^1.1.1"
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
