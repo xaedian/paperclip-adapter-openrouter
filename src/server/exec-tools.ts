@@ -38,9 +38,10 @@ export function resolveWorkspaceRoot(
 
 function assertInside(root: string, target: string): string {
   const r = path.resolve(root);
-  const t = path.resolve(target);
+  // Resolve relative targets against the workspace root, then verify containment.
+  const t = path.resolve(r, target);
   const rel = path.relative(r, t);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
     throw new Error(`Path escapes the agent workspace: ${target}`);
   }
   return t;
