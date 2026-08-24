@@ -59,13 +59,20 @@ export async function resolveOpenRouterApiKey(
   }
   const binding = config?.[SECRET_BINDING_CONFIG_KEY] as Record<string, unknown> | undefined;
   if (!secretId && binding && typeof binding.secretId === "string") secretId = binding.secretId;
-
   if ((name || secretId) && ctx?.api) {
     try {
       const list = await ctx.api.listMySecrets();
-      const entry = list.find(
-        (s) => (name && s.key === name) || (secretId && s.secretId === secretId),
-      );
+      const norm = (v: unknown) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+      // The host lowercases secret keys and strips secretId from list output,
+      // so match by case-insensitive key/name; fall back to the sole entry
+      // when only a secretId is known and the agent has exactly one grant.
+      let entry =
+        list.find(
+          (s) =>
+            (name && (norm(s.key) === norm(name) || norm(s.name) === norm(name))) ||
+            (secretId && norm(s.secretId) === norm(secretId)),
+        ) ?? null;
+      if (!entry && secretId && list.length === 1) entry = list[0];
       if (entry && typeof entry.key === "string") {
         const val = await ctx.api.getMySecretValue(entry.key);
         if (val?.value) return { key: val.value, source: "paperclip_secret" };
@@ -74,7 +81,6 @@ export async function resolveOpenRouterApiKey(
       // Not granted / not bound this run - treated as unresolved.
     }
   }
-
   return null;
 }
 
