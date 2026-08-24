@@ -179,8 +179,12 @@ export class PaperclipApi {
   // ----- Agent-scoped secrets -----
 
   /** List secrets granted to this agent for the current run. */
-  listMySecrets(): Promise<Array<Record<string, unknown>>> {
-    return this.request("GET", "/api/agents/me/secrets");
+  async listMySecrets(): Promise<Array<Record<string, unknown>>> {
+    const res = await this.request<{ secrets?: Array<Record<string, unknown>> }>(
+      "GET",
+      "/api/agents/me/secrets",
+    );
+    return Array.isArray(res?.secrets) ? res.secrets : [];
   }
 
   /** Resolve the current value of one of this agent's granted secrets. */
