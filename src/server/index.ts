@@ -78,9 +78,9 @@ function getConfigSchema(): AdapterConfigSchema {
     fields: [
       {
         key: "apiKey",
-        label: "OpenRouter API key",
+        label: "OpenRouter API key (per-agent override)",
         type: "text",
-        hint: "sk-or-v1-... Leave blank to use OPENROUTER_API_KEY env var, or use a secret ref like {{OPENROUTER_API_KEY}}.",
+        hint: "Leave blank unless this agent needs its own billing identity. Fleet key lives in the OPENROUTER_API_KEY company secret / server env var.",
       },
       {
         key: "systemPrompt",
