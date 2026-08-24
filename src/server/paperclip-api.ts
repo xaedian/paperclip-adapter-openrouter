@@ -13,6 +13,8 @@
 export interface PaperclipApiOptions {
   baseUrl?: string;
   authToken: string;
+  /** Heartbeat run id - sent as X-Paperclip-Run-Id so writes attribute correctly. */
+  runId?: string;
   /** Optional fetch impl override for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -39,11 +41,13 @@ function resolveBaseUrl(explicit?: string): string {
 export class PaperclipApi {
   private readonly baseUrl: string;
   private readonly authToken: string;
+  private readonly runId?: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: PaperclipApiOptions) {
     this.baseUrl = resolveBaseUrl(opts.baseUrl);
     this.authToken = opts.authToken;
+    this.runId = opts.runId;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
@@ -57,6 +61,9 @@ export class PaperclipApi {
       Authorization: `Bearer ${this.authToken}`,
       Accept: "application/json",
     };
+    // Attribute every mutation to this heartbeat run (cross-issue write cap
+    // + audit trail require it).
+    if (this.runId) headers["X-Paperclip-Run-Id"] = this.runId;
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
     let response: Response;

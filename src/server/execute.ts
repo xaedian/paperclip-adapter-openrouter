@@ -298,10 +298,44 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // can still respond, but cannot act.
   let api: PaperclipApi | null = null;
   let tools: Tool[] = [];
-  const currentIssueId = extractCurrentIssueId(ctx);
 
   if (authToken) {
-    api = new PaperclipApi({ authToken });
+    api = new PaperclipApi({ authToken, runId: ctx.runId });
+  } else {
+    await writeRawStderr(
+      onLog,
+      "[openrouter] No authToken on context - tool calls disabled. Agent can only generate text.",
+    );
+  }
+
+  // Resolve the issue this run is working. Wake payload first (assignment /
+  // automation wakes carry it); on-demand wakes often don't, so fall back to
+  // probing the agent's in-progress issues.
+  let currentIssueId = extractCurrentIssueId(ctx);
+  if (!currentIssueId && api) {
+    try {
+      const mine = (await api.listCompanyIssues(agent.companyId, {
+        assigneeAgentId: agent.id,
+        status: "in_progress",
+        limit: "10",
+      })) as unknown;
+      const list = Array.isArray(mine)
+        ? (mine as Record<string, unknown>[])
+        : ((mine as { issues?: Record<string, unknown>[] }).issues ?? []);
+      const candidate = list
+        .slice()
+        .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))[0];
+      if (candidate && typeof candidate.id === "string") {
+        currentIssueId = candidate.id;
+        await writeRawStderr(onLog, `[openrouter] wake carried no issue; using in-progress issue ${currentIssueId}`);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await writeRawStderr(onLog, `[openrouter] issue probe failed: ${reason}`);
+    }
+  }
+
+  if (api) {
     tools = buildTools({
       api,
       agentId: agent.id,
@@ -309,11 +343,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       currentIssueId,
       autoApprove,
     });
-  } else {
-    await writeRawStderr(
-      onLog,
-      "[openrouter] No authToken on context - tool calls disabled. Agent can only generate text.",
-    );
   }
 
   await emitInit(onLog, { model, sessionId: ctx.runId });
