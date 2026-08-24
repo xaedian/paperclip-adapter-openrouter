@@ -185,7 +185,14 @@ async function callOpenRouterOnce(
   }
   if (config.reasoning) body.reasoning = { effort: "high" };
   if (config.transforms?.length) body.transforms = config.transforms;
-  if (config.route) body.route = config.route;
+  // Route handling: OpenRouter's legacy "no-fallback" top-level value was
+  // retired - the API now accepts route: "fallback" | "sort", and disabling
+  // failover is expressed via provider.allow_fallbacks instead.
+  if (config.route === "fallback") {
+    body.route = "fallback";
+  } else if (config.route === "no-fallback") {
+    body.provider = { allow_fallbacks: false };
+  }
 
   let response: Response;
   try {
