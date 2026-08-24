@@ -29,7 +29,7 @@ export async function resolveOpenRouterApiKey(
   }
   try {
     const home = process.env.HOME || process.env.USERPROFILE || ".";
-    const raw = await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8");
+    const raw = (await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8")).replace(/^\uFEFF/, "");
     const parsed = JSON.parse(raw) as { apiKey?: unknown };
     const shared = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
     if (shared) return { key: shared, source: "shared_config_file" };

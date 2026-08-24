@@ -77,7 +77,7 @@ export function buildEnvironmentBlock(
   // Layer configured notes underneath: shared file first, then agent-specific.
   let sharedNotes: string[] = [];
   try {
-    sharedNotes = collectNotes(JSON.parse(readFileSync(sharedConfigPath(), "utf8")).environmentNotes);
+    sharedNotes = collectNotes(JSON.parse(readFileSync(sharedConfigPath(), "utf8").replace(/^\uFEFF/, "")).environmentNotes);
   } catch {
     // No shared config file - skip.
   }
