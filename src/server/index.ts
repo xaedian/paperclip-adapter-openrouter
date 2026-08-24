@@ -136,6 +136,12 @@ function getConfigSchema(): AdapterConfigSchema {
         hint: "Absolute root for local exec tools. Default: the host-managed per-agent workspace.",
       },
       {
+        key: "environmentNotes",
+        label: "Environment notes",
+        type: "textarea",
+        hint: "Extra facts injected into every run's system prompt (machine quirks, tool paths). Fleet-wide tier: ~/.openrouter-adapter/config.json .environmentNotes",
+      },
+      {
         key: "reasoning",
         label: "Extended thinking",
         type: "toggle",

@@ -42,7 +42,7 @@ import {
 } from "../index.js";
 import { PaperclipApi } from "./paperclip-api.js";
 import { buildTools, findTool, toolSchemas, type Tool } from "./tools.js";
-import { buildExecTools, resolveWorkspaceRoot } from "./exec-tools.js";
+import { buildExecTools, buildEnvironmentBlock, resolveWorkspaceRoot } from "./exec-tools.js";
 import { getModelMaxCompletionTokens, resolveOpenRouterApiKey } from "./test.js";
 import { loadSkills, renderSkillsForPrompt } from "./skills.js";
 import {
@@ -597,6 +597,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const reason = err instanceof Error ? err.message : String(err);
     await writeRawStderr(onLog, `[openrouter] skill loading error (continuing): ${reason}`);
   }
+
+  // Runtime environment facts + configured operator notes. Injected for every
+  // run so machine quirks never depend on ticket comments or bundle state.
+  const wsRootForEnv = resolveWorkspaceRoot(config, agent.id);
+  const envBlock = buildEnvironmentBlock(config, wsRootForEnv);
+  systemContent = `${systemContent}\n\n${envBlock}`;
+  await writeRawStderr(
+    onLog,
+    `[openrouter] environment block injected (${(envBlock.match(/^- /gm) ?? []).length} entries)`,
+  );
+
   messages.push({ role: "system", content: systemContent });
 
   // User prompt = Paperclip wake payload rendered as text.

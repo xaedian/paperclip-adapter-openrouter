@@ -170,6 +170,8 @@ export interface OpenRouterConfig {
   enableLocalExec?: boolean;
   /** Absolute workspace root for local exec tools. Default: host-managed per-agent workspace. */
   workspaceDir?: string;
+  /** Extra environment notes injected into every run's system prompt (machine quirks, tool paths). Shared file tier: ~/.openrouter-adapter/config.json .environmentNotes */
+  environmentNotes?: string;
   /** Override path to skills directory. Default ~/.openrouter-adapter/skills */
   skillsDir?: string;
   /** Absolute path to a markdown file read at runtime and used as the system prompt (overrides systemPrompt). */

@@ -13,6 +13,7 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { Tool } from "./tools.js";
 
@@ -34,6 +35,57 @@ export function resolveWorkspaceRoot(
   if (!home) return null;
   const instance = process.env.PAPERCLIP_INSTANCE_ID?.trim() || "default";
   return path.join(home, ".paperclip", "instances", instance, "workspaces", agentId);
+}
+
+/**
+ * Build the Environment block appended to every run's system prompt.
+ *
+ * Runtime-discoverable facts (shell, workspace root, Windows quoting rules)
+ * are always included; operator-configured notes are layered underneath:
+ *   1. shared file %USERPROFILE%\.openrouter-adapter\config.json .environmentNotes
+ *   2. per-agent adapterConfig.environmentNotes
+ */
+/** Shared adapter config file used for tiered settings (API key, env notes). */
+export function sharedConfigPath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  return path.join(home, ".openrouter-adapter", "config.json");
+}
+
+function collectNotes(v: unknown): string[] {
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  if (typeof v === "string" && v.trim().length > 0) return [v];
+  return [];
+}
+
+export function buildEnvironmentBlock(
+  config: Record<string, unknown>,
+  workspaceRoot: string | null,
+): string {
+  const lines: string[] = ["## Environment"];
+  if (process.platform === "win32") {
+    lines.push(
+      '- Shell: cmd.exe (not git-bash). POSIX constructs like "export VAR=value" fail; use cmd syntax.',
+      '- Quote PATH assignments: set "PATH=%PATH%;C:\\some\\dir" - unquoted assignments break when an existing PATH entry contains parentheses.',
+    );
+  } else {
+    lines.push("- Shell: POSIX sh.");
+  }
+  if (workspaceRoot) {
+    lines.push(`- Workspace root: all file and command tools operate inside ${workspaceRoot}`);
+  }
+
+  // Layer configured notes underneath: shared file first, then agent-specific.
+  let sharedNotes: string[] = [];
+  try {
+    sharedNotes = collectNotes(JSON.parse(readFileSync(sharedConfigPath(), "utf8")).environmentNotes);
+  } catch {
+    // No shared config file - skip.
+  }
+  for (const note of [...sharedNotes, ...collectNotes(config.environmentNotes)]) {
+    lines.push(`- ${note.trim()}`);
+  }
+
+  return lines.join("\n");
 }
 
 function assertInside(root: string, target: string): string {
