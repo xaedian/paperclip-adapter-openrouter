@@ -8,7 +8,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export type OpenRouterKeySource = "agent_config" | "shared_config_file" | "env";
+export type OpenRouterKeySource =
+  | "agent_config"
+  | "paperclip_secret"
+  | "shared_config_file"
+  | "env";
 
 export interface ResolvedOpenRouterKey {
   key: string;
@@ -19,18 +23,61 @@ export function maskKey(key: string): string {
   return key.length > 16 ? `${key.slice(0, 12)}...${key.slice(-4)}` : "***";
 }
 
+/**
+ * Tiered OpenRouter API key resolution, first match wins:
+ *   1. per-agent adapterConfig.apiKey - literal key, OR "{{SECRET_NAME}}" /
+ *      {type:"secret_ref",secretId} reference resolved against the agent's own
+ *      granted-secrets endpoint (requires a run-bound agent JWT)
+ *   2. shared file %USERPROFILE%\.openrouter-adapter\config.json .apiKey
+ *   3. OPENROUTER_API_KEY environment variable
+ */
 export async function resolveOpenRouterApiKey(
   config: Record<string, unknown>,
+  ctx?: { api?: import("./paperclip-api.js").PaperclipApi | null },
 ): Promise<ResolvedOpenRouterKey | null> {
-  const fromConfig = typeof config?.apiKey === "string" ? config.apiKey.trim() : "";
-  // Unresolved {{SECRET_REF}} placeholders count as absent so lower tiers can serve.
-  if (fromConfig && !fromConfig.startsWith("{{")) {
-    return { key: fromConfig, source: "agent_config" };
+  const raw = config?.apiKey;
+
+  // Literal key (but not an unresolved {{ref}}).
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed && !trimmed.startsWith("{{")) {
+      return { key: trimmed, source: "agent_config" };
+    }
   }
+
+  // Reference form: {{NAME}} string or secret_ref object.
+  let name: string | null = null;
+  let secretId: string | null = null;
+  if (typeof raw === "string") {
+    const m = raw.trim().match(/^\{\{(.+)\}\}$/);
+    if (m) name = m[1].trim();
+  } else if (raw && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    if (o.type === "secret_ref" && typeof o.secretId === "string") secretId = o.secretId;
+  }
+  if ((name || secretId) && ctx?.api) {
+    try {
+      const list = await ctx.api.listMySecrets();
+      const entry = list.find(
+        (s) =>
+          (name && s.key === name) ||
+          (secretId && s.secretId === secretId),
+      );
+      if (entry && typeof entry.key === "string") {
+        const val = await ctx.api.getMySecretValue(entry.key);
+        if (val?.value) return { key: val.value, source: "paperclip_secret" };
+      }
+    } catch {
+      // Not granted / not bound this run - fall through to lower tiers.
+    }
+  }
+
   try {
     const home = process.env.HOME || process.env.USERPROFILE || ".";
-    const raw = (await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8")).replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(raw) as { apiKey?: unknown };
+    const rawFile = (
+      await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8")
+    ).replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(rawFile) as { apiKey?: unknown };
     const shared = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
     if (shared) return { key: shared, source: "shared_config_file" };
   } catch {

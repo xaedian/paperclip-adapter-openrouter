@@ -73,6 +73,11 @@ export function buildEnvironmentBlock(
   if (workspaceRoot) {
     lines.push(`- Workspace root: all file and command tools operate inside ${workspaceRoot}`);
   }
+  // Surface operator-managed environment variables so agents know the real paths.
+  for (const name of ["COMSPEC", "FLUTTER_ROOT", "SUDOKU_REPO"]) {
+    const v = process.env[name]?.trim();
+    if (v) lines.push(`- ${name}: ${v}`);
+  }
 
   // Layer configured notes underneath: shared file first, then agent-specific.
   let sharedNotes: string[] = [];

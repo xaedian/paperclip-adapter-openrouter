@@ -176,6 +176,18 @@ export class PaperclipApi {
     return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/comments`, body);
   }
 
+  // ----- Agent-scoped secrets -----
+
+  /** List secrets granted to this agent for the current run. */
+  listMySecrets(): Promise<Array<Record<string, unknown>>> {
+    return this.request("GET", "/api/agents/me/secrets");
+  }
+
+  /** Resolve the current value of one of this agent's granted secrets. */
+  getMySecretValue(key: string): Promise<{ key: string; value: string; version?: string }> {
+    return this.request("POST", `/api/agents/me/secrets/${encodeURIComponent(key)}/value`);
+  }
+
   // ----- Agents -----
 
   /**

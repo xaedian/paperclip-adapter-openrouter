@@ -665,7 +665,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let apiKey: string;
   try {
-    const resolved = await resolveOpenRouterApiKey(config);
+    const resolved = await resolveOpenRouterApiKey(config, { api });
     if (!resolved) {
       throw new Error(
         "OpenRouter API key not found in any tier. Set agent adapterConfig.apiKey (or {{SECRET_REF}}), ~/.openrouter-adapter/config.json (.apiKey), or the OPENROUTER_API_KEY env var on the Paperclip server.",
