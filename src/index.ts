@@ -89,10 +89,9 @@ with a full multi-turn tool-calling loop against Paperclip's REST API.
 ## Core fields
 - \`model\` (string) — any OpenRouter model id, e.g. "anthropic/claude-sonnet-4-6".
   "openrouter/auto" lets OpenRouter pick per request; ":free" suffix routes to the free tier.
-- \`apiKey\` (string, secret) — per-agent override only. The fleet key should be
-  stored once as a Paperclip company secret (OPENROUTER_API_KEY) and/or the
-  server environment variable of the same name; leave this blank unless an
-  agent deliberately needs its own billing identity.
+- \`apiKey\` (string) — per-agent override ONLY; leave blank for fleet default.
+  Fleet key lives in the Paperclip Secrets Manager (OPENROUTER_API_KEY) and is
+  resolved automatically at run time - no env vars or files involved.
 
 ## Tool loop
 - \`maxTurns\` (number, default 30) — max model/tool round-trips per run

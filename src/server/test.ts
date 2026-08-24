@@ -1,18 +1,11 @@
 // ─────────────────────────────────────────────────────────────────
-// OpenRouter API key resolution - tiered, first match wins:
-//   1. per-agent adapterConfig.apiKey   (supports {{SECRET_REF}} refs)
-//   2. shared file %USERPROFILE%\.openrouter-adapter\config.json .apiKey
-//   3. OPENROUTER_API_KEY environment variable (instance .env, Windows env)
+// OpenRouter API key resolution - Paperclip Secrets Manager ONLY:
+//   1. literal per-agent adapterConfig.apiKey override
+//   2. Paperclip secret resolved via the agent's granted-secrets runtime
+//      surface, referenced by {{SECRET_NAME}} or a secret_ref binding
 // ─────────────────────────────────────────────────────────────────
 
-import fs from "node:fs/promises";
-import path from "node:path";
-
-export type OpenRouterKeySource =
-  | "agent_config"
-  | "paperclip_secret"
-  | "shared_config_file"
-  | "env";
+export type OpenRouterKeySource = "agent_config_literal" | "paperclip_secret";
 
 export interface ResolvedOpenRouterKey {
   key: string;
@@ -24,12 +17,21 @@ export function maskKey(key: string): string {
 }
 
 /**
- * Tiered OpenRouter API key resolution, first match wins:
- *   1. per-agent adapterConfig.apiKey - literal key, OR "{{SECRET_NAME}}" /
- *      {type:"secret_ref",secretId} reference resolved against the agent's own
- *      granted-secrets endpoint (requires a run-bound agent JWT)
- *   2. shared file %USERPROFILE%\.openrouter-adapter\config.json .apiKey
- *   3. OPENROUTER_API_KEY environment variable
+ * Config key holding the Paperclip secret binding. Kept separate from the
+ * display-friendly apiKey field (which carries the {{SECRET_NAME}} reference)
+ * so the UI stays clean while the runtime binding still registers.
+ */
+export const SECRET_BINDING_CONFIG_KEY = "openrouterApiKeySecret";
+
+/**
+ * API key resolution - Paperclip Secrets Manager ONLY:
+ *   1. Literal non-ref string in adapterConfig.apiKey (per-agent override)
+ *   2. Paperclip secret resolved via the agent's granted-secrets runtime
+ *      surface, targeted by either the {{SECRET_NAME}} reference in
+ *      adapterConfig.apiKey or the binding object in
+ *      adapterConfig[SECRET_BINDING_CONFIG_KEY].
+ *
+ * No environment-variable or file-based tiers exist by design.
  */
 export async function resolveOpenRouterApiKey(
   config: Record<string, unknown>,
@@ -37,15 +39,15 @@ export async function resolveOpenRouterApiKey(
 ): Promise<ResolvedOpenRouterKey | null> {
   const raw = config?.apiKey;
 
-  // Literal key (but not an unresolved {{ref}}).
+  // Per-agent literal override.
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     if (trimmed && !trimmed.startsWith("{{")) {
-      return { key: trimmed, source: "agent_config" };
+      return { key: trimmed, source: "agent_config_literal" };
     }
   }
 
-  // Reference form: {{NAME}} string or secret_ref object.
+  // Derive the secret name / id from whichever reference shape is present.
   let name: string | null = null;
   let secretId: string | null = null;
   if (typeof raw === "string") {
@@ -55,36 +57,24 @@ export async function resolveOpenRouterApiKey(
     const o = raw as Record<string, unknown>;
     if (o.type === "secret_ref" && typeof o.secretId === "string") secretId = o.secretId;
   }
+  const binding = config?.[SECRET_BINDING_CONFIG_KEY] as Record<string, unknown> | undefined;
+  if (!secretId && binding && typeof binding.secretId === "string") secretId = binding.secretId;
+
   if ((name || secretId) && ctx?.api) {
     try {
       const list = await ctx.api.listMySecrets();
       const entry = list.find(
-        (s) =>
-          (name && s.key === name) ||
-          (secretId && s.secretId === secretId),
+        (s) => (name && s.key === name) || (secretId && s.secretId === secretId),
       );
       if (entry && typeof entry.key === "string") {
         const val = await ctx.api.getMySecretValue(entry.key);
         if (val?.value) return { key: val.value, source: "paperclip_secret" };
       }
     } catch {
-      // Not granted / not bound this run - fall through to lower tiers.
+      // Not granted / not bound this run - treated as unresolved.
     }
   }
 
-  try {
-    const home = process.env.HOME || process.env.USERPROFILE || ".";
-    const rawFile = (
-      await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8")
-    ).replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(rawFile) as { apiKey?: unknown };
-    const shared = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
-    if (shared) return { key: shared, source: "shared_config_file" };
-  } catch {
-    // No shared config file - fall through.
-  }
-  const fromEnv = process.env.OPENROUTER_API_KEY?.trim();
-  if (fromEnv) return { key: fromEnv, source: "env" };
   return null;
 }
 

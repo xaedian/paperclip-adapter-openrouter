@@ -80,7 +80,7 @@ function getConfigSchema(): AdapterConfigSchema {
         key: "apiKey",
         label: "OpenRouter API key (per-agent override)",
         type: "text",
-        hint: "Leave blank unless this agent needs its own billing identity. Fleet key lives in the OPENROUTER_API_KEY company secret / server env var.",
+        hint: "Leave blank - fleet key is resolved from the OPENROUTER_API_KEY Paperclip secret. Fill in only if this agent needs its own billing identity.",
       },
       {
         key: "systemPrompt",
