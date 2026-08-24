@@ -42,6 +42,7 @@ import {
 } from "../index.js";
 import { PaperclipApi } from "./paperclip-api.js";
 import { buildTools, findTool, toolSchemas, type Tool } from "./tools.js";
+import { getModelMaxCompletionTokens, resolveOpenRouterApiKey } from "./test.js";
 import { loadSkills, renderSkillsForPrompt } from "./skills.js";
 import {
   emitAssistant,
@@ -92,8 +93,9 @@ interface ChatCompletionResponse {
 
 // ── helpers ─────────────────────────────────────────────────────
 
-const DEFAULT_MAX_TURNS = 25;
-const DEFAULT_REQUEST_TIMEOUT_SEC = 300;
+const DEFAULT_MAX_TURNS = 30;
+const DEFAULT_MAX_TOKENS = 16384;
+const DEFAULT_REQUEST_TIMEOUT_SEC = 600;
 const DEFAULT_SYSTEM_PROMPT =
   "You are an AI agent working inside Paperclip, an autonomous company orchestration system. " +
   "When you receive a wake payload, your job is to EXECUTE the assigned task - not describe it. " +
@@ -106,17 +108,6 @@ function resolveConfig(ctx: AdapterExecutionContext): OpenRouterConfig & Record<
   const hostConfig = (ctx.config ?? {}) as Record<string, unknown>;
   const agentConfig = (ctx.agent?.adapterConfig ?? {}) as Record<string, unknown>;
   return { ...hostConfig, ...agentConfig } as OpenRouterConfig & Record<string, unknown>;
-}
-
-function resolveApiKey(config: OpenRouterConfig): string {
-  // NOTE: never ctx.authToken - that is the Paperclip JWT, not an OpenRouter key.
-  const key = (config.apiKey ?? "").trim() || process.env.OPENROUTER_API_KEY?.trim() || "";
-  if (!key) {
-    throw new Error(
-      "OpenRouter API key not found. Set adapterConfig.apiKey (or a {{SECRET_REF}}) or the OPENROUTER_API_KEY env var on the Paperclip server.",
-    );
-  }
-  return key;
 }
 
 function resolveBillingType(_config: OpenRouterConfig): "api" {
@@ -179,10 +170,11 @@ async function callOpenRouterOnce(
   tools: Tool[],
   timeoutMs: number,
 ): Promise<ChatCompletionResponse> {
+  const requestedMaxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
   const body: Record<string, unknown> = {
     model: config.model || "openrouter/auto",
     messages,
-    max_tokens: config.maxTokens ?? 4096,
+    max_tokens: requestedMaxTokens,
     temperature: config.temperature ?? 0.7,
     top_p: config.topP ?? 1,
     stream: false,
@@ -401,11 +393,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
 
-  // ── resolve OpenRouter key ───────────────────────────────────
+  // ── resolve OpenRouter key (tiered) ──────────────────────────
 
   let apiKey: string;
   try {
-    apiKey = resolveApiKey(config);
+    const resolved = await resolveOpenRouterApiKey(config);
+    if (!resolved) {
+      throw new Error(
+        "OpenRouter API key not found in any tier. Set agent adapterConfig.apiKey (or {{SECRET_REF}}), ~/.openrouter-adapter/config.json (.apiKey), or the OPENROUTER_API_KEY env var on the Paperclip server.",
+      );
+    }
+    apiKey = resolved.key;
+    await writeRawStderr(onLog, `[openrouter] using API key from ${resolved.source}`);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     await writeRawStderr(onLog, `[openrouter] ${reason}\n`);
@@ -435,6 +434,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
+  // Clamp the completion budget to the selected model's advertised maximum
+  // (OpenRouter's public catalog). Unknown models keep the configured value.
+  let effectiveConfig: OpenRouterConfig & Record<string, unknown> = config;
+  try {
+    const cap = await getModelMaxCompletionTokens(model);
+    const requested = config.maxTokens ?? DEFAULT_MAX_TOKENS;
+    if (cap && cap > 0 && requested > cap) {
+      effectiveConfig = { ...config, maxTokens: cap };
+      await writeRawStderr(
+        onLog,
+        `[openrouter] clamped max_tokens ${requested} -> ${cap} (advertised maximum for ${model})`,
+      );
+    }
+  } catch {
+    // Catalog unavailable - send the configured value as-is.
+  }
+
   // ── tool loop ────────────────────────────────────────────────
 
   let lastGenerationId: string | undefined;
@@ -455,7 +471,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       let response: ChatCompletionResponse;
       try {
-        response = await callOpenRouter(apiKey, config, messages, tools, requestTimeoutMs);
+        response = await callOpenRouter(apiKey, effectiveConfig, messages, tools, requestTimeoutMs);
       } catch (err) {
         const family = err instanceof OpenRouterHttpError ? err.family : null;
         const reason = err instanceof Error ? err.message : String(err);

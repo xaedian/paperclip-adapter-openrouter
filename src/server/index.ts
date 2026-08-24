@@ -71,28 +71,16 @@ async function refreshModels(): Promise<AdapterModel[]> {
 // ─────────────────────────────────────────────────────────────────
 
 function getConfigSchema(): AdapterConfigSchema {
+  // NOTE: do NOT declare `model` or `instructionsFilePath` here - the stock
+  // agent form already renders a Model picker (fed by models/listModels)
+  // and, when supportsInstructionsBundle is true, an instructions editor.
   return {
     fields: [
-      {
-        key: "model",
-        label: "Model",
-        type: "combobox",
-        required: true,
-        default: "openrouter/auto",
-        hint: "Any OpenRouter model id. \":free\" suffix = free tier; openrouter/auto = let OpenRouter route.",
-        options: fallbackModels.map((m) => ({ label: m.label, value: m.id })),
-      },
       {
         key: "apiKey",
         label: "OpenRouter API key",
         type: "text",
         hint: "sk-or-v1-... Leave blank to use OPENROUTER_API_KEY env var, or use a secret ref like {{OPENROUTER_API_KEY}}.",
-      },
-      {
-        key: "instructionsFilePath",
-        label: "Instructions file path",
-        type: "text",
-        hint: "Absolute path to a markdown file used as the system prompt (overrides System prompt).",
       },
       {
         key: "systemPrompt",
@@ -111,20 +99,21 @@ function getConfigSchema(): AdapterConfigSchema {
         key: "maxTokens",
         label: "Max completion tokens",
         type: "number",
-        default: 4096,
+        default: 16384,
+        hint: "Per-request completion budget. Automatically clamped to the selected model's advertised maximum.",
       },
       {
         key: "maxTurns",
         label: "Max tool-loop turns",
         type: "number",
-        default: 25,
+        default: 30,
         hint: "Maximum model/tool round-trips per run.",
       },
       {
         key: "requestTimeoutSec",
         label: "Request timeout (sec)",
         type: "number",
-        default: 300,
+        default: 600,
       },
       {
         key: "reasoning",

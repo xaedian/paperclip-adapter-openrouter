@@ -1,6 +1,48 @@
 // ─────────────────────────────────────────────────────────────────
-// @paperclipai/adapter-openrouter — Server Test (Environment Check)
-// Matches real Paperclip AdapterEnvironmentTestContext / Result
+// OpenRouter API key resolution - tiered, first match wins:
+//   1. per-agent adapterConfig.apiKey   (supports {{SECRET_REF}} refs)
+//   2. shared file %USERPROFILE%\.openrouter-adapter\config.json .apiKey
+//   3. OPENROUTER_API_KEY environment variable (instance .env, Windows env)
+// ─────────────────────────────────────────────────────────────────
+
+import fs from "node:fs/promises";
+import path from "node:path";
+
+export type OpenRouterKeySource = "agent_config" | "shared_config_file" | "env";
+
+export interface ResolvedOpenRouterKey {
+  key: string;
+  source: OpenRouterKeySource;
+}
+
+export function maskKey(key: string): string {
+  return key.length > 16 ? `${key.slice(0, 12)}...${key.slice(-4)}` : "***";
+}
+
+export async function resolveOpenRouterApiKey(
+  config: Record<string, unknown>,
+): Promise<ResolvedOpenRouterKey | null> {
+  const fromConfig = typeof config?.apiKey === "string" ? config.apiKey.trim() : "";
+  // Unresolved {{SECRET_REF}} placeholders count as absent so lower tiers can serve.
+  if (fromConfig && !fromConfig.startsWith("{{")) {
+    return { key: fromConfig, source: "agent_config" };
+  }
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || ".";
+    const raw = await fs.readFile(path.join(home, ".openrouter-adapter", "config.json"), "utf8");
+    const parsed = JSON.parse(raw) as { apiKey?: unknown };
+    const shared = typeof parsed.apiKey === "string" ? parsed.apiKey.trim() : "";
+    if (shared) return { key: shared, source: "shared_config_file" };
+  } catch {
+    // No shared config file - fall through.
+  }
+  const fromEnv = process.env.OPENROUTER_API_KEY?.trim();
+  if (fromEnv) return { key: fromEnv, source: "env" };
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Environment check (Test Environment button)
 // ─────────────────────────────────────────────────────────────────
 
 import type {
@@ -20,17 +62,16 @@ export async function testEnvironment(
   const checks: AdapterEnvironmentCheck[] = [];
   const config = ctx.config as unknown as OpenRouterConfig;
 
-  // ── 1. Check API key ──────────────────────────────────────────
-  const apiKey =
-    config.apiKey ||
-    process.env.OPENROUTER_API_KEY;
+  // ── 1. Check API key (tiered) ─────────────────────────────────
+  const resolved = await resolveOpenRouterApiKey(ctx.config ?? {});
 
-  if (!apiKey) {
+  if (!resolved) {
     checks.push({
       code: "openrouter_api_key_missing",
       level: "error",
-      message: "No OpenRouter API key found",
-      detail: "Set adapterConfig.apiKey or OPENROUTER_API_KEY environment variable.",
+      message: "No OpenRouter API key found in any tier",
+      detail:
+        "Tiers checked: agent adapterConfig.apiKey, ~/.openrouter-adapter/config.json (.apiKey), OPENROUTER_API_KEY env var.",
       hint: "Get a key at https://openrouter.ai/keys",
     });
     return {
@@ -40,6 +81,8 @@ export async function testEnvironment(
       testedAt: new Date().toISOString(),
     };
   }
+
+  const apiKey = resolved.key;
 
   if (!apiKey.startsWith("sk-or-")) {
     checks.push({
@@ -53,7 +96,7 @@ export async function testEnvironment(
   checks.push({
     code: "openrouter_api_key_found",
     level: "info",
-    message: `API key found: ${apiKey.slice(0, 12)}...${apiKey.slice(-4)}`,
+    message: `API key found via ${resolved.source}: ${maskKey(apiKey)}`,
   });
 
   // ── 2. Test API connectivity & fetch models ───────────────────
@@ -147,33 +190,68 @@ export async function testEnvironment(
 }
 
 /**
- * Fetch all models from OpenRouter — used by listModels() for dynamic model picker.
+ * Fetch all models from OpenRouter's public catalog - no API key required,
+ * so the model picker works even before credentials are configured.
+ * Returns entries sorted free-tier first, then alphabetically, each with the
+ * model's advertised max completion tokens (used to clamp requests).
  */
-export async function listOpenRouterModels(): Promise<{ id: string; label: string }[]> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) return [];
+export interface OpenRouterCatalogEntry {
+  id: string;
+  label: string;
+  maxCompletionTokens: number | null;
+  contextLength: number | null;
+}
 
+let catalogCache: { at: number; entries: OpenRouterCatalogEntry[] } | null = null;
+const CATALOG_TTL_MS = 10 * 60 * 1000;
+
+export async function fetchOpenRouterCatalog(force = false): Promise<OpenRouterCatalogEntry[]> {
+  if (!force && catalogCache && Date.now() - catalogCache.at < CATALOG_TTL_MS) {
+    return catalogCache.entries;
+  }
   try {
+    console.error(`[openrouter] fetching model catalog (force=${force})`);
+    const apiKey = process.env.OPENROUTER_API_KEY?.trim();
     const res = await fetch(OPENROUTER_MODELS_ENDPOINT, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: AbortSignal.timeout(15000),
     });
-    if (!res.ok) return [];
-
-    const data = (await res.json()) as { data: OpenRouterModel[] };
-    return (data.data || [])
-      .sort((a, b) => {
-        const aFree = a.id.endsWith(":free") || (a.pricing?.prompt === "0" && a.pricing?.completion === "0");
-        const bFree = b.id.endsWith(":free") || (b.pricing?.prompt === "0" && b.pricing?.completion === "0");
-        if (aFree && !bFree) return -1;
-        if (!aFree && bFree) return 1;
-        return (a.name || a.id).localeCompare(b.name || b.id);
-      })
-      .map((m) => ({
-        id: m.id,
-        label: m.name || m.id,
-      }));
-  } catch {
-    return [];
+    if (!res.ok) {
+      console.error(`[openrouter] catalog fetch HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+      return catalogCache?.entries ?? [];
+    }
+    const data = (await res.json()) as { data?: OpenRouterModel[] };
+    const entries: OpenRouterCatalogEntry[] = (data.data ?? []).map((m) => ({
+      id: m.id,
+      label: m.name || m.id,
+      maxCompletionTokens:
+        typeof m.top_provider?.max_completion_tokens === "number"
+          ? m.top_provider.max_completion_tokens
+          : null,
+      contextLength: typeof m.context_length === "number" ? m.context_length : null,
+    }));
+    if (entries.length === 0) return catalogCache?.entries ?? [];
+    entries.sort((a, b) => {
+      const aFree = a.id.endsWith(":free");
+      const bFree = b.id.endsWith(":free");
+      if (aFree !== bFree) return aFree ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+    catalogCache = { at: Date.now(), entries };
+    console.error(`[openrouter] model catalog loaded: ${entries.length} models`);
+    return entries;
+  } catch (err) {
+    console.error(`[openrouter] catalog fetch error: ${err instanceof Error ? err.message : String(err)}`);
+    return catalogCache?.entries ?? [];
   }
+}
+
+/** Look up a model's advertised max completion tokens (null when unknown). */
+export async function getModelMaxCompletionTokens(modelId: string): Promise<number | null> {
+  const entries = await fetchOpenRouterCatalog();
+  return entries.find((e) => e.id === modelId)?.maxCompletionTokens ?? null;
+}
+
+export async function listOpenRouterModels(): Promise<{ id: string; label: string }[]> {
+  return (await fetchOpenRouterCatalog()).map(({ id, label }) => ({ id, label }));
 }

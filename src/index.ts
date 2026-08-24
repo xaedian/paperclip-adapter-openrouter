@@ -94,12 +94,13 @@ with a full multi-turn tool-calling loop against Paperclip's REST API.
   or leave blank to use the OPENROUTER_API_KEY environment variable on the server.
 
 ## Tool loop
-- \`maxTurns\` (number, default 25) — max model/tool round-trips per run
+- \`maxTurns\` (number, default 30) — max model/tool round-trips per run
 - \`autoApprove\` (boolean, default false) — skip the human approval gate on hire_agent
-- \`requestTimeoutSec\` (number, default 300) — per-request timeout
+- \`requestTimeoutSec\` (number, default 600) — per-request timeout
 
 ## Sampling
-- \`temperature\` (0-2, default 0.7), \`topP\` (default 1), \`maxTokens\` (default 4096)
+- \`temperature\` (0-2, default 0.7), \`topP\` (default 1), \`maxTokens\` (default 16384,
+  automatically clamped to the selected model's advertised maximum)
 - \`reasoning\` (boolean) — extended thinking for reasoning-capable models
 - \`transforms\` (string[]) — OpenRouter transforms, e.g. ["middle-out"]
 - \`route\` ("fallback" | "no-fallback") — provider failover behaviour
