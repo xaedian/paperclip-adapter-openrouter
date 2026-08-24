@@ -666,14 +666,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   let apiKey: string;
   try {
     const resolved = await resolveOpenRouterApiKey(config, { api, onLog });
-    if (api && config.apiKey) {
-      try {
-        const granted = await api.listMySecrets();
-        await writeRawStderr(onLog, `[openrouter] debug: granted secrets -> ${JSON.stringify(granted).slice(0, 400)}`);
-      } catch (e) {
-        await writeRawStderr(onLog, `[openrouter] debug: listMySecrets failed -> ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
     if (!resolved) {
       throw new Error(
         "OpenRouter API key not found in any tier. Set agent adapterConfig.apiKey (or {{SECRET_REF}}), ~/.openrouter-adapter/config.json (.apiKey), or the OPENROUTER_API_KEY env var on the Paperclip server.",
@@ -681,16 +673,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     apiKey = resolved.key;
     await writeRawStderr(onLog, `[openrouter] using API key from ${resolved.source}`);
-    try {
-      const parts = (authToken ?? "").split(".");
-      const claims = JSON.parse(Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
-      await writeRawStderr(
-        onLog,
-        `[openrouter] debug: ctx.runId=${ctx.runId} jwt.sub=${claims.sub} jwt.run_id=${claims.run_id ?? "NONE"} jwt.responsible_user_id=${claims.responsible_user_id ?? "NONE"}`,
-      );
-    } catch {
-      await writeRawStderr(onLog, "[openrouter] debug: could not decode authToken as JWT");
-    }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     await writeRawStderr(onLog, `[openrouter] ${reason}\n`);
