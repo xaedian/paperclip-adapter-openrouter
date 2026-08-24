@@ -35,7 +35,10 @@ export const SECRET_BINDING_CONFIG_KEY = "openrouterApiKeySecret";
  */
 export async function resolveOpenRouterApiKey(
   config: Record<string, unknown>,
-  ctx?: { api?: import("./paperclip-api.js").PaperclipApi | null },
+  ctx?: {
+    api?: import("./paperclip-api.js").PaperclipApi | null;
+    onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  },
 ): Promise<ResolvedOpenRouterKey | null> {
   const raw = config?.apiKey;
 
@@ -60,8 +63,12 @@ export async function resolveOpenRouterApiKey(
   const binding = config?.[SECRET_BINDING_CONFIG_KEY] as Record<string, unknown> | undefined;
   if (!secretId && binding && typeof binding.secretId === "string") secretId = binding.secretId;
   if ((name || secretId) && ctx?.api) {
+    const dbg = async (m: string) => {
+      if (ctx.onLog) await ctx.onLog("stderr", `[openrouter] secret tier: ${m}\n`);
+    };
     try {
       const list = await ctx.api.listMySecrets();
+      await dbg(`granted=${list.length} name=${name ?? "-"} secretId=${secretId ?? "-"}`);
       const norm = (v: unknown) => (typeof v === "string" ? v.trim().toLowerCase() : "");
       // The host lowercases secret keys and strips secretId from list output,
       // so match by case-insensitive key/name; fall back to the sole entry
@@ -76,9 +83,12 @@ export async function resolveOpenRouterApiKey(
       if (entry && typeof entry.key === "string") {
         const val = await ctx.api.getMySecretValue(entry.key);
         if (val?.value) return { key: val.value, source: "paperclip_secret" };
+        await dbg("value endpoint returned empty");
+      } else {
+        await dbg("no matching granted entry");
       }
-    } catch {
-      // Not granted / not bound this run - treated as unresolved.
+    } catch (err) {
+      await dbg(`failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return null;

@@ -665,7 +665,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let apiKey: string;
   try {
-    const resolved = await resolveOpenRouterApiKey(config, { api });
+    const resolved = await resolveOpenRouterApiKey(config, { api, onLog });
     if (api && config.apiKey) {
       try {
         const granted = await api.listMySecrets();
