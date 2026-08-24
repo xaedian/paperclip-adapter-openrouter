@@ -97,6 +97,13 @@ with a full multi-turn tool-calling loop against Paperclip's REST API.
 - \`maxTurns\` (number, default 30) — max model/tool round-trips per run
 - \`autoApprove\` (boolean, default false) — skip the human approval gate on hire_agent
 - \`requestTimeoutSec\` (number, default 600) — per-request timeout
+- \`stream\` (boolean, default true) — live token streaming into the run transcript
+
+## Local execution (workspace tools)
+When \`enableLocalExec\` is true (default), the agent also gets workspace-confined
+tools: \`run_command\`, \`read_file\`, \`write_file\`, \`list_dir\`. Paths are jailed to
+\`workspaceDir\` (default: the host-managed per-agent workspace); command output is
+byte-capped and commands are killed at their timeout.
 
 ## Sampling
 - \`temperature\` (0-2, default 0.7), \`topP\` (default 1), \`maxTokens\` (default 16384,
@@ -151,12 +158,18 @@ export interface OpenRouterConfig {
   route?: "fallback" | "no-fallback";
   httpReferer?: string;
   xTitle?: string;
-  /** Max tool-loop turns per run. Default 25. */
+  /** Max tool-loop turns per run. Default 30. */
   maxTurns?: number;
   /** Skip approval gates for hire_agent. Default false. */
   autoApprove?: boolean;
-  /** Per-request timeout seconds. Default 300. */
+  /** Per-request timeout seconds. Default 600. */
   requestTimeoutSec?: number;
+  /** Stream tokens via SSE. Default true; set false for plain request/response. */
+  stream?: boolean;
+  /** Enable guarded workspace-local tools (run_command/read_file/write_file/list_dir). Default true. */
+  enableLocalExec?: boolean;
+  /** Absolute workspace root for local exec tools. Default: host-managed per-agent workspace. */
+  workspaceDir?: string;
   /** Override path to skills directory. Default ~/.openrouter-adapter/skills */
   skillsDir?: string;
   /** Absolute path to a markdown file read at runtime and used as the system prompt (overrides systemPrompt). */

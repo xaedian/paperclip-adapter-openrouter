@@ -1,5 +1,5 @@
-/**
- * OpenRouter adapter execute() — multi-turn tool-calling loop.
+﻿/**
+ * OpenRouter adapter execute() â€” multi-turn tool-calling loop.
  *
  * Restored from the originally-verified v2 implementation and updated for
  * the Paperclip external-adapter contract (adapter-utils >= 2026.4xx):
@@ -7,7 +7,7 @@
  *     ctx.agent.adapterConfig over ctx.config
  *   - AdapterExecutionResult: exitCode/signal/timedOut required; usage has
  *     input/output (+cached) tokens only; costUsd is top-level
- *   - wake prompt rendered via renderPaperclipWakePrompt(context) — no
+ *   - wake prompt rendered via renderPaperclipWakePrompt(context) â€” no
  *     skillsPrompt option; skills are appended to the system prompt here
  *   - issue updates send only schema-known fields (status); reasons go
  *     into comments instead of a statusReason field
@@ -17,7 +17,7 @@
  *     we declare supportsLocalAgentJwt: true). It authenticates tool calls
  *     against Paperclip's REST API ONLY.
  *   - The OpenRouter key always comes from adapterConfig.apiKey or the
- *     OPENROUTER_API_KEY env var — never from ctx.authToken.
+ *     OPENROUTER_API_KEY env var â€” never from ctx.authToken.
  */
 
 import fs from "node:fs/promises";
@@ -42,6 +42,7 @@ import {
 } from "../index.js";
 import { PaperclipApi } from "./paperclip-api.js";
 import { buildTools, findTool, toolSchemas, type Tool } from "./tools.js";
+import { buildExecTools, resolveWorkspaceRoot } from "./exec-tools.js";
 import { getModelMaxCompletionTokens, resolveOpenRouterApiKey } from "./test.js";
 import { loadSkills, renderSkillsForPrompt } from "./skills.js";
 import {
@@ -55,7 +56,7 @@ import {
   writeRawStderr,
 } from "./transcript.js";
 
-// ── OpenRouter / OpenAI chat completion types ───────────────────
+// â”€â”€ OpenRouter / OpenAI chat completion types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -91,7 +92,19 @@ interface ChatCompletionResponse {
   };
 }
 
-// ── helpers ─────────────────────────────────────────────────────
+/** Unified per-turn result regardless of streaming mode. */
+interface TurnOutcome {
+  generationId: string | null;
+  content: string;
+  reasoning: string;
+  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+  finishReason: string | null;
+  usage: { prompt_tokens?: number; completion_tokens?: number } | null;
+  /** true when deltas were already emitted to the transcript during the stream. */
+  emittedDeltas: boolean;
+}
+
+// â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const DEFAULT_MAX_TURNS = 30;
 const DEFAULT_MAX_TOKENS = 16384;
@@ -163,22 +176,34 @@ class OpenRouterHttpError extends Error {
   }
 }
 
-async function callOpenRouterOnce(
-  apiKey: string,
+
+/** Unified per-turn result regardless of streaming mode. */
+interface TurnOutcome {
+  generationId: string | null;
+  content: string;
+  reasoning: string;
+  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+  finishReason: string | null;
+  usage: { prompt_tokens?: number; completion_tokens?: number } | null;
+  /** true when deltas were already emitted to the transcript during the stream. */
+  emittedDeltas: boolean;
+}
+
+function buildRequestBody(
   config: OpenRouterConfig,
   messages: ChatMessage[],
   tools: Tool[],
-  timeoutMs: number,
-): Promise<ChatCompletionResponse> {
-  const requestedMaxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
+  stream: boolean,
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: config.model || "openrouter/auto",
     messages,
-    max_tokens: requestedMaxTokens,
+    max_tokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
     temperature: config.temperature ?? 0.7,
     top_p: config.topP ?? 1,
-    stream: false,
+    stream,
   };
+  if (stream) body.stream_options = { include_usage: true };
   if (tools.length > 0) {
     body.tools = toolSchemas(tools);
     body.tool_choice = "auto";
@@ -193,13 +218,22 @@ async function callOpenRouterOnce(
   } else if (config.route === "no-fallback") {
     body.provider = { allow_fallbacks: false };
   }
+  return body;
+}
 
+async function chatTurnNonStream(
+  apiKey: string,
+  config: OpenRouterConfig,
+  messages: ChatMessage[],
+  tools: Tool[],
+  timeoutMs: number,
+): Promise<TurnOutcome> {
   let response: Response;
   try {
     response = await fetch(OPENROUTER_CHAT_ENDPOINT, {
       method: "POST",
       headers: buildHeaders(apiKey, config),
-      body: JSON.stringify(body),
+      body: JSON.stringify(buildRequestBody(config, messages, tools, false)),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
@@ -215,29 +249,197 @@ async function callOpenRouterOnce(
     );
   }
 
+  let json: ChatCompletionResponse;
   try {
-    return JSON.parse(text) as ChatCompletionResponse;
+    json = JSON.parse(text) as ChatCompletionResponse;
   } catch {
     throw new OpenRouterHttpError(`OpenRouter returned invalid JSON: ${text.slice(0, 200)}`, 500);
   }
+
+  const choice = json.choices?.[0];
+  return {
+    generationId: json.id ?? null,
+    content: typeof choice?.message.content === "string" ? choice.message.content : "",
+    reasoning: typeof choice?.message.reasoning === "string" ? choice.message.reasoning : "",
+    toolCalls: (choice?.message.tool_calls ?? []).map((tc) => ({
+      id: tc.id,
+      function: { name: tc.function.name, arguments: tc.function.arguments },
+    })),
+    finishReason: choice?.finish_reason ?? null,
+    usage: json.usage
+      ? { prompt_tokens: json.usage.prompt_tokens, completion_tokens: json.usage.completion_tokens }
+      : null,
+    emittedDeltas: false,
+  };
 }
 
-/** One conservative retry for transient failures (429 / 5xx / network). */
-async function callOpenRouter(
+interface ToolCallAccumulator {
+  id: string;
+  name: string;
+  args: string;
+}
+
+function mergeToolCallDeltas(
+  acc: Map<number, ToolCallAccumulator>,
+  deltas: Array<{
+    index?: number;
+    id?: string | null;
+    function?: { name?: string | null; arguments?: string | null };
+  }>,
+): void {
+  for (const d of deltas) {
+    const idx = typeof d.index === "number" ? d.index : acc.size;
+    const cur = acc.get(idx) ?? { id: "", name: "", args: "" };
+    if (typeof d.id === "string" && d.id) cur.id = d.id;
+    if (typeof d.function?.name === "string") cur.name += d.function.name;
+    if (typeof d.function?.arguments === "string") cur.args += d.function.arguments;
+    acc.set(idx, cur);
+  }
+}
+
+async function chatTurnStream(
   apiKey: string,
   config: OpenRouterConfig,
   messages: ChatMessage[],
   tools: Tool[],
   timeoutMs: number,
-): Promise<ChatCompletionResponse> {
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>,
+): Promise<TurnOutcome> {
+  let response: Response;
   try {
-    return await callOpenRouterOnce(apiKey, config, messages, tools, timeoutMs);
+    response = await fetch(OPENROUTER_CHAT_ENDPOINT, {
+      method: "POST",
+      headers: buildHeaders(apiKey, config),
+      body: JSON.stringify(buildRequestBody(config, messages, tools, true)),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new OpenRouterHttpError(`Network error calling OpenRouter: ${reason}`, 599);
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new OpenRouterHttpError(
+      `OpenRouter API error (${response.status}): ${errText.slice(0, 500)}`,
+      response.status,
+    );
+  }
+  if (!response.body) {
+    throw new OpenRouterHttpError("OpenRouter returned an empty stream", 500);
+  }
+
+  const outcome: TurnOutcome = {
+    generationId: null,
+    content: "",
+    reasoning: "",
+    toolCalls: [],
+    finishReason: null,
+    usage: null,
+    emittedDeltas: true,
+  };
+
+  interface StreamEvent {
+    id?: string;
+    choices?: Array<{
+      finish_reason?: string | null;
+      delta?: {
+        content?: string | null;
+        reasoning?: string | null;
+        tool_calls?: Array<{
+          index?: number;
+          id?: string | null;
+          function?: { name?: string | null; arguments?: string | null };
+        }>;
+      };
+    }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    error?: { message?: string; code?: number | string };
+  }
+
+  const acc = new Map<number, ToolCallAccumulator>();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let newlineIdx: number;
+    while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newlineIdx).replace(/\r$/, "");
+      buffer = buffer.slice(newlineIdx + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let event: StreamEvent;
+      try {
+        event = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (event.error) {
+        throw new OpenRouterHttpError(
+          `OpenRouter stream error: ${event.error.message ?? JSON.stringify(event.error).slice(0, 200)}`,
+          typeof event.error.code === "number" ? event.error.code : 500,
+        );
+      }
+      if (event.id && !outcome.generationId) outcome.generationId = event.id;
+      if (event.usage) {
+        outcome.usage = {
+          prompt_tokens: event.usage.prompt_tokens,
+          completion_tokens: event.usage.completion_tokens,
+        };
+      }
+      const choice = event.choices?.[0];
+      if (!choice) continue;
+      if (choice.finish_reason) outcome.finishReason = choice.finish_reason;
+      const delta = choice.delta ?? {};
+      if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) {
+        outcome.reasoning += delta.reasoning;
+        await emitThinking(onLog, delta.reasoning, { delta: true });
+      }
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        outcome.content += delta.content;
+        await emitAssistant(onLog, delta.content, { delta: true });
+      }
+      if (delta.tool_calls?.length) mergeToolCallDeltas(acc, delta.tool_calls);
+    }
+  }
+
+  outcome.toolCalls = [...acc.entries()]
+    .sort(([a], [b]) => a - b)
+    .filter(([, v]) => v.name.length > 0)
+    .map(([, v]) => ({
+      id: v.id || `call_${v.name}_${acc.size}`,
+      function: { name: v.name, arguments: v.args || "{}" },
+    }));
+  return outcome;
+}
+
+/** One conservative retry for transient failures (429 / 5xx / network). */
+async function chatTurnWithRetry(
+  apiKey: string,
+  config: OpenRouterConfig,
+  messages: ChatMessage[],
+  tools: Tool[],
+  timeoutMs: number,
+  onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>,
+): Promise<TurnOutcome> {
+  const attempt = (): Promise<TurnOutcome> =>
+    config.stream === false
+      ? chatTurnNonStream(apiKey, config, messages, tools, timeoutMs)
+      : chatTurnStream(apiKey, config, messages, tools, timeoutMs, onLog);
+
+  try {
+    return await attempt();
   } catch (err) {
     const retriable =
-      err instanceof OpenRouterHttpError && (err.status === 429 || err.status >= 500);
+      err instanceof OpenRouterHttpError && (err.status === 429 || err.status >= 500 || err.status === 599);
     if (!retriable) throw err;
     await new Promise((r) => setTimeout(r, 2000));
-    return callOpenRouterOnce(apiKey, config, messages, tools, timeoutMs);
+    return attempt();
   }
 }
 
@@ -266,7 +468,7 @@ async function fetchGenerationCost(
   }
 }
 
-// ── main ────────────────────────────────────────────────────────
+// â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const config = resolveConfig(ctx);
@@ -343,11 +545,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       currentIssueId,
       autoApprove,
     });
+
+    // Guarded local execution toolset (workspace-confined). Enabled by default;
+    // set enableLocalExec: false in adapterConfig to opt an agent out.
+    if (config.enableLocalExec !== false) {
+      const wsRoot = resolveWorkspaceRoot(config, agent.id);
+      if (wsRoot) {
+        try {
+          const fsMk = await import("node:fs/promises");
+          await fsMk.mkdir(wsRoot, { recursive: true });
+          tools = tools.concat(buildExecTools({ workspaceRoot: wsRoot }));
+          await writeRawStderr(onLog, `[openrouter] local exec tools enabled (workspace ${wsRoot})`);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          await writeRawStderr(onLog, `[openrouter] exec tools disabled - workspace unusable: ${reason}`);
+        }
+      } else {
+        await writeRawStderr(onLog, "[openrouter] exec tools disabled - no home directory resolved");
+      }
+    }
   }
 
   await emitInit(onLog, { model, sessionId: ctx.runId });
 
-  // ── build messages ───────────────────────────────────────────
+  // â”€â”€ build messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   const messages: ChatMessage[] = [];
   let systemContent = config.systemPrompt || DEFAULT_SYSTEM_PROMPT;
@@ -391,7 +612,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     content: wakePrompt || JSON.stringify(ctx.context ?? {}),
   });
 
-  // ── acquire the issue run lock ───────────────────────────────
+  // â”€â”€ acquire the issue run lock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   //
   // Paperclip rejects writes to an issue unless the caller's run owns its
   // checkout. Heartbeat-dispatched runs are pre-checked-out by the host
@@ -418,7 +639,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
 
-  // ── mark issue in_progress ───────────────────────────────────
+  // â”€â”€ mark issue in_progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   if (api && currentIssueId && issueLocked) {
     try {
@@ -429,7 +650,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
 
-  // ── resolve OpenRouter key (tiered) ──────────────────────────
+  // â”€â”€ resolve OpenRouter key (tiered) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   let apiKey: string;
   try {
@@ -441,6 +662,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     apiKey = resolved.key;
     await writeRawStderr(onLog, `[openrouter] using API key from ${resolved.source}`);
+    try {
+      const parts = (authToken ?? "").split(".");
+      const claims = JSON.parse(Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+      await writeRawStderr(
+        onLog,
+        `[openrouter] debug: ctx.runId=${ctx.runId} jwt.sub=${claims.sub} jwt.run_id=${claims.run_id ?? "NONE"} jwt.responsible_user_id=${claims.responsible_user_id ?? "NONE"}`,
+      );
+    } catch {
+      await writeRawStderr(onLog, "[openrouter] debug: could not decode authToken as JWT");
+    }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     await writeRawStderr(onLog, `[openrouter] ${reason}\n`);
@@ -487,7 +718,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Catalog unavailable - send the configured value as-is.
   }
 
-  // ── tool loop ────────────────────────────────────────────────
+  // â”€â”€ tool loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   let lastGenerationId: string | undefined;
   let totalUsage: UsageSummary = { inputTokens: 0, outputTokens: 0 };
@@ -505,9 +736,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     while (turn < maxTurns) {
       turn += 1;
 
-      let response: ChatCompletionResponse;
+      let outcome: TurnOutcome;
       try {
-        response = await callOpenRouter(apiKey, effectiveConfig, messages, tools, requestTimeoutMs);
+        outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requestTimeoutMs, onLog);
       } catch (err) {
         const family = err instanceof OpenRouterHttpError ? err.family : null;
         const reason = err instanceof Error ? err.message : String(err);
@@ -516,39 +747,42 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         break;
       }
 
-      lastGenerationId = response.id || lastGenerationId;
-      if (response.usage) {
+      if (outcome.generationId) lastGenerationId = outcome.generationId;
+      if (outcome.usage) {
         totalUsage = {
-          inputTokens: totalUsage.inputTokens + (response.usage.prompt_tokens ?? 0),
-          outputTokens: totalUsage.outputTokens + (response.usage.completion_tokens ?? 0),
+          inputTokens: totalUsage.inputTokens + (outcome.usage.prompt_tokens ?? 0),
+          outputTokens: totalUsage.outputTokens + (outcome.usage.completion_tokens ?? 0),
         };
       }
 
-      const choice = response.choices?.[0];
-      if (!choice) {
-        runError = {
-          message: "OpenRouter returned no choices (model may not exist or is unavailable)",
-          code: "openrouter_empty_response",
-          family: "transient_upstream",
-        };
-        stoppedReason = "error";
-        break;
-      }
+      const reasoning = outcome.reasoning;
+      const text = outcome.content;
+      const toolCalls = outcome.toolCalls;
 
-      const msg = choice.message;
-      const reasoning = typeof msg.reasoning === "string" ? msg.reasoning : "";
-      const text = typeof msg.content === "string" ? msg.content : "";
-      const toolCalls = msg.tool_calls ?? [];
-
-      if (reasoning) await emitThinking(onLog, reasoning);
-      if (text) {
-        await emitAssistant(onLog, text);
-        finalAssistantText = text;
+      // Streaming already emitted thinking/content deltas; only emit here for
+      // the non-streaming path.
+      if (!outcome.emittedDeltas) {
+        if (reasoning) await emitThinking(onLog, reasoning);
+        if (text) await emitAssistant(onLog, text);
       }
+      if (text) finalAssistantText = text;
 
       // No tool calls => model is done.
       if (toolCalls.length === 0) {
-        stoppedReason = "completed";
+        if (outcome.finishReason === "length" && !finalAssistantText.trim()) {
+          // Model burned its entire completion budget (often on reasoning)
+          // before emitting any user-visible content.
+          runError = {
+            message:
+              `Model hit the completion token limit before producing output (finish_reason=length). ` +
+              `Increase "Max completion tokens" for this agent.`,
+            code: "token_budget_exhausted",
+            family: null,
+          };
+          stoppedReason = "error";
+        } else {
+          stoppedReason = "completed";
+        }
         break;
       }
 
@@ -625,7 +859,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     stoppedReason = "error";
   }
 
-  // ── post-loop: cost, comment, status ─────────────────────────
+  // â”€â”€ post-loop: cost, comment, status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   let costUsd: number | null = null;
   if (lastGenerationId) {

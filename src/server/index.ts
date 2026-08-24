@@ -116,6 +116,26 @@ function getConfigSchema(): AdapterConfigSchema {
         default: 600,
       },
       {
+        key: "stream",
+        label: "Token streaming",
+        type: "toggle",
+        default: true,
+        hint: "Stream tokens live to the run transcript via SSE. Disable for plain request/response.",
+      },
+      {
+        key: "enableLocalExec",
+        label: "Workspace local execution",
+        type: "toggle",
+        default: true,
+        hint: "Adds run_command / read_file / write_file / list_dir tools, confined to the agent workspace.",
+      },
+      {
+        key: "workspaceDir",
+        label: "Workspace directory",
+        type: "text",
+        hint: "Absolute root for local exec tools. Default: the host-managed per-agent workspace.",
+      },
+      {
         key: "reasoning",
         label: "Extended thinking",
         type: "toggle",
