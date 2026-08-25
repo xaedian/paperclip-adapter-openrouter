@@ -113,8 +113,17 @@ const DEFAULT_SYSTEM_PROMPT =
   "You are an AI agent working inside Paperclip, an autonomous company orchestration system. " +
   "When you receive a wake payload, your job is to EXECUTE the assigned task - not describe it. " +
   "Use the tools available to you to read context, post comments, update status, and delegate work. " +
-  "When finished, post a summary comment via add_comment and call update_issue_status with status='done'. " +
-  "If you cannot complete the work, explain why in a comment and set status='blocked'.";
+  "Hand-off rules (important): when your work needs human or board sign-off, call issue_interaction with " +
+  "kind='request_confirmation' (payload.prompt describes what to confirm), then set status='in_review'. " +
+  "When a decision or answer is missing and you cannot proceed, call issue_interaction (kind='ask_user_questions' " +
+  "or 'request_confirmation') and set status='blocked'. A pending interaction or a linked approval makes these " +
+  "status changes valid; without one they will be rejected. When finished with no review needed, post a summary " +
+  "comment via add_comment and call update_issue_status with status='done'. If you cannot complete the work at " +
+  "all, explain why in a comment, create an interaction explaining the blocker, then set status='blocked'. " +
+  "Approval discipline: NEVER close a task (done/cancelled) while it has a pending linked approval or a pending " +
+  "interaction - the update_issue_status tool will refuse; park the task as in_review/blocked instead and wait. " +
+  "If you find an older approval floating without an issue link, repair it with link_approval instead of " +
+  "creating a duplicate request.";
 
 /** Merge agent-level adapterConfig over any host-level defaults. */
 function resolveConfig(ctx: AdapterExecutionContext): OpenRouterConfig & Record<string, unknown> {
@@ -887,12 +896,43 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? `Hit max_turns (${maxTurns}) without completing`
         : runError?.message ?? null;
     if (blockReason) {
+      // Paperclip's disposition gate rejects a bare agent-authored transition
+      // to blocked (422) unless the issue has a pending interaction/approval,
+      // unresolved blockers, or an unblockDescriptor. So: post the comment
+      // FIRST, then create a request_confirmation interaction describing the
+      // blocker, and only then attempt the blocked transition. If the
+      // transition is still rejected the issue simply stays in its current
+      // state with a visible pending interaction - which is the correct
+      // outcome (the board sees the parked question) instead of an exception.
+      const commentBody = `Run blocked: ${blockReason}`;
       try {
-        await api.updateIssue(currentIssueId, { status: "blocked" });
-        await api.addIssueComment(currentIssueId, { body: `Run blocked: ${blockReason}` });
+        await api.addIssueComment(currentIssueId, { body: commentBody });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        await writeRawStderr(onLog, `[openrouter] could not update final status: ${reason}`);
+        await writeRawStderr(onLog, `[openrouter] could not post block comment: ${reason}`);
+      }
+      try {
+        await api.createIssueInteraction(currentIssueId, {
+          kind: "request_confirmation",
+          payload: {
+            version: 1,
+            prompt:
+              `The run ended abnormally (${stoppedReason}). Reason: ${blockReason.slice(0, 900)}. ` +
+              "Confirm to re-run this task, or reject to close it.",
+          },
+          idempotencyKey: `run-blocked:${ctx.runId ?? lastGenerationId ?? currentIssueId}`,
+        });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        await writeRawStderr(onLog, `[openrouter] could not create blocked-run interaction: ${reason}`);
+      }
+      try {
+        await api.updateIssue(currentIssueId, { status: "blocked" });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        // Expected when no review path exists - the pending interaction above
+        // already hands the issue to the board, so this is non-fatal.
+        await writeRawStderr(onLog, `[openrouter] could not update final status (non-fatal): ${reason}`);
       }
     }
   }

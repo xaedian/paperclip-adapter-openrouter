@@ -212,8 +212,73 @@ export class PaperclipApi {
   }
 
   // ----- Approvals -----
-
-  createApproval(companyId: string, approval: Record<string, unknown>): Promise<Record<string, unknown>> {
+  /**
+   * Create a company-level approval. Pass `issueIds` to link the approval to
+   * specific issues — a pending issue-linked approval counts as a real review
+   * path (invalid_issue_disposition gate) and gates the task until resolved.
+   * Schema: createApprovalSchema = { type, requestedByAgentId?, payload, issueIds?: uuid[] }.
+   */
+  createApproval(
+    companyId: string,
+    approval: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     return this.request("POST", `/api/companies/${encodeURIComponent(companyId)}/approvals`, approval);
+  }
+
+  listCompanyApprovals(
+    companyId: string,
+    query?: Record<string, string>,
+  ): Promise<unknown> {
+    const qs = query && Object.keys(query).length > 0 ? `?${new URLSearchParams(query).toString()}` : "";
+    return this.request("GET", `/api/companies/${encodeURIComponent(companyId)}/approvals${qs}`);
+  }
+
+  // ----- Issue-thread interactions -----
+  /**
+   * Create an interaction on an issue thread (request_confirmation,
+   * ask_user_questions, ...). A pending interaction is THE canonical review
+   * path: it lets the agent move the issue to in_review/blocked without
+   * tripping invalid_issue_disposition, and hands control to the board/user.
+   *
+   * Everything must be nested under `payload`; `payload.version` (literal 1)
+   * and `payload.prompt` are mandatory for request_confirmation.
+   * The run id is sent via X-Paperclip-Run-Id (set in request()).
+   */
+  createIssueInteraction(
+    issueId: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/interactions`, body);
+  }
+
+  /**
+   * List interactions on an issue (used to check whether a pending
+   * confirmation already exists before creating a duplicate).
+   */
+  listIssueInteractions(issueId: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/interactions`);
+  }
+
+  // ----- Issue ↔ approval linking -----
+  /**
+   * List approvals linked to an issue (agent-readable). Used by the
+   * update_status completion guard: a pending linked approval must block
+   * agent-authored done/cancelled so sign-off requests cannot be silently
+   * orphaned by closing the task.
+   */
+  listIssueApprovals(issueId: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/approvals`);
+  }
+
+  /**
+   * Link an EXISTING approval to an issue. Agent-accessible route
+   * (POST /api/issues/:id/approvals, body {approvalId}). This repairs
+   * approvals created before v2.6 that float company-wide with no issue link,
+   * turning them into real gates (linked_pending_approval review path).
+   */
+  linkIssueApproval(issueId: string, approvalId: string): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/approvals`, {
+      approvalId,
+    });
   }
 }

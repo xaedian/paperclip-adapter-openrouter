@@ -115,7 +115,11 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
         description:
           "Move an issue to a new status. Valid statuses: " +
           PAPERCLIP_ISSUE_STATUSES.join(", ") +
-          ". Defaults to the current issue.",
+          ". Defaults to the current issue. " +
+          "GUARD: moving an issue to 'done' or 'cancelled' while it still has a PENDING linked approval or pending " +
+          "issue_interaction is rejected by this adapter - resolve the review path first (ask the board to decide) " +
+          "or pick status='in_review'/'blocked'. This prevents closing tasks out from under unanswered sign-off " +
+          "requests.",
         parameters: {
           type: "object",
           properties: {
@@ -126,8 +130,13 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
             },
             reason: {
               type: "string",
+              description: "Optional explanation. When provided it is posted as a comment alongside the status change.",
+            },
+            force: {
+              type: "boolean",
               description:
-                "Optional explanation. When provided it is posted as a comment alongside the status change.",
+                "Set true ONLY when you have explicitly confirmed in a comment that the pending approval/interaction " +
+                "is being withdrawn or superseded, and the close is intentional despite it. Default false.",
             },
           },
           required: ["status"],
@@ -142,9 +151,52 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
       if (!(PAPERCLIP_ISSUE_STATUSES as readonly string[]).includes(status)) {
         return fail(`Invalid status "${status}". Valid: ${PAPERCLIP_ISSUE_STATUSES.join(", ")}`);
       }
-      const result = await safeCall("update_issue_status", () =>
-        ctx.api.updateIssue(id, { status }),
-      );
+      // Completion guard: block agent-authored done/cancelled while a review
+      // path is still pending on the issue (unless explicitly forced).
+      const terminal = status === "done" || status === "cancelled";
+      if (terminal && args.force !== true) {
+        const blockers: string[] = [];
+        try {
+          const approvals = await ctx.api.listIssueApprovals(id);
+          const rows = Array.isArray(approvals)
+            ? (approvals as Array<Record<string, unknown>>)
+            : (((approvals as Record<string, unknown> | null)?.approvals ??
+                (approvals as Record<string, unknown> | null)?.items ??
+                []) as Array<Record<string, unknown>>);
+          for (const a of rows) {
+            if (a.status === "pending" || a.status === "revision_requested") {
+              blockers.push(`approval ${(a.id as string)?.slice(0, 8)} (${a.type}) status=${a.status}`);
+            }
+          }
+        } catch {
+          // Read failed - do not soft-block on our own blindness; let the server decide.
+        }
+        try {
+          const interactions = await ctx.api.listIssueInteractions(id);
+          const irows = Array.isArray(interactions)
+            ? (interactions as Array<Record<string, unknown>>)
+            : (((interactions as Record<string, unknown> | null)?.interactions ??
+                (interactions as Record<string, unknown> | null)?.items ??
+                []) as Array<Record<string, unknown>>);
+          for (const it of irows) {
+            if (it.status === "pending") {
+              blockers.push(`interaction ${(it.id as string)?.slice(0, 8)} (${it.kind}) status=pending`);
+            }
+          }
+        } catch {
+          // Same - server-side gate remains authoritative.
+        }
+        if (blockers.length > 0) {
+          return fail(
+            `Cannot set status="${status}": unresolved review paths on this issue: ${blockers.join("; ")}. ` +
+              `Resolve them first (board must approve/reject/answer), or use status="in_review"/"blocked" to park ` +
+              `the work legitimately. If you are deliberately withdrawing the request(s), post a comment saying so ` +
+              `and retry with force=true.`,
+            { pendingReviewPaths: blockers },
+          );
+        }
+      }
+      const result = await safeCall("update_issue_status", () => ctx.api.updateIssue(id, { status }));
       // Post the reason as a comment so the explanation is visible in-thread.
       const reason = asString(args.reason);
       if (!result.isError && reason) {
@@ -155,6 +207,40 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
         }
       }
       return result;
+    },
+  };
+}
+
+/**
+ * Link an EXISTING (probably company-wide floating) approval to an issue so
+ * it becomes a real task gate. Repairs pre-v2.6 approvals.
+ */
+function linkApprovalTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "link_approval",
+        description:
+          "Link an existing approval request to an issue so the issue is actually gated by it. Use this to repair " +
+          "older approvals that were created without an issue link (they float company-wide and never block their " +
+          "task). Defaults to linking onto the current issue.",
+        parameters: {
+          type: "object",
+          properties: {
+            approval_id: { type: "string", description: "Approval id (uuid) to link." },
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+          },
+          required: ["approval_id"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const approvalId = asString(args.approval_id);
+      if (!approvalId) return fail("approval_id is required.");
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      return safeCall("link_approval", () => ctx.api.linkIssueApproval(id, approvalId));
     },
   };
 }
@@ -335,10 +421,13 @@ function hireAgentTool(ctx: BuildToolsContext): Tool {
       }
 
       // Default path: route through approvals so a human signs off.
+      // issueIds links the approval to the task so it gates this issue
+      // (linked_pending_approval review path) instead of floating company-wide.
       return safeCall("hire_agent (approval)", () =>
         ctx.api.createApproval(ctx.companyId, {
           type: "hire_agent",
           requestedByAgentId: ctx.agentId,
+          ...(ctx.currentIssueId ? { issueIds: [ctx.currentIssueId] } : {}),
           payload: { ...hirePayload, summary: `Hire ${name}${hirePayload.title ? ` as ${hirePayload.title}` : ""}` },
         }),
       );
@@ -391,7 +480,8 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
         description:
           "Open an approval request for an action that requires human sign-off. Supported types: hire_agent, " +
           "approve_ceo_strategy, budget_override_required, request_board_approval. For hiring, prefer the " +
-          "dedicated hire_agent tool instead.",
+          "dedicated hire_agent tool instead. The approval is linked to the current issue when one exists, so " +
+          "the issue stays gated on the pending approval until a human resolves it.",
         parameters: {
           type: "object",
           properties: {
@@ -402,6 +492,12 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
             },
             summary: { type: "string", description: "One-line summary for the operator." },
             payload: { type: "object", description: "Structured payload describing the action." },
+            link_issue_id: {
+              type: "string",
+              description:
+                "Optional issue id to link the approval to. Defaults to the current issue. " +
+                "Pass the empty string to create the approval without any issue link.",
+            },
           },
           required: ["type", "summary"],
         },
@@ -412,14 +508,155 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
       const summary = asString(args.summary);
       if (!type) return fail("type is required and must be hire_agent / approve_ceo_strategy / budget_override_required.");
       if (!summary) return fail("summary is required.");
+      // Linking: default to the current issue; explicit link_issue_id overrides;
+      // explicit empty string opts out of linking entirely.
+      let issueIds: string[] = [];
+      if (typeof args.link_issue_id === "string") {
+        if (args.link_issue_id.trim().length > 0) issueIds = [args.link_issue_id.trim()];
+      } else if (ctx.currentIssueId) {
+        issueIds = [ctx.currentIssueId];
+      }
       const payload = (args.payload && typeof args.payload === "object" ? args.payload : {}) as Record<string, unknown>;
-      return safeCall("request_approval", () =>
+      const approval = await safeCall("request_approval", () =>
         ctx.api.createApproval(ctx.companyId, {
           type,
           requestedByAgentId: ctx.agentId,
+          ...(issueIds.length > 0 ? { issueIds } : {}),
           payload: { ...payload, summary },
         }),
       );
+      // Self-healing linkage: if creation succeeded but the server dropped the
+      // link (older host, race with run checkout), verify and repair via the
+      // agent-accessible POST /issues/:id/approvals route.
+      if (!approval.isError && issueIds.length > 0) {
+        try {
+          const created = JSON.parse(approval.content) as { id?: string };
+          if (created?.id) {
+            const linked = (await ctx.api.listIssueApprovals(issueIds[0])) as unknown;
+            const rows = Array.isArray(linked)
+              ? (linked as Array<Record<string, unknown>>)
+              : (((linked as Record<string, unknown> | null)?.approvals ??
+                  (linked as Record<string, unknown> | null)?.items ??
+                  []) as Array<Record<string, unknown>>);
+            if (!rows.some((r) => r.id === created.id)) {
+              await ctx.api.linkIssueApproval(issueIds[0], created.id);
+            }
+          }
+        } catch {
+          // Verification is best-effort; the approval itself was created.
+        }
+      }
+      return approval;
+    },
+  };
+}
+
+const INTERACTION_KINDS = [
+  "suggest_tasks",
+  "ask_user_questions",
+  "request_confirmation",
+  "request_checkbox_confirmation",
+  "request_item_verdicts",
+] as const;
+
+/**
+ * Issue-thread interaction tool — THE canonical review path.
+ *
+ * A pending interaction satisfies Paperclip's disposition gate so the agent
+ * can legitimately move an issue to in_review or blocked ("waiting for
+ * board/user") instead of having the transition rejected with 422
+ * invalid_issue_disposition and continuing to churn on the task.
+ */
+function issueInteractionTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "issue_interaction",
+        description:
+          "Post an interaction onto an issue thread to hand control to a human or teammate. Kinds: " +
+          "request_confirmation (ask the board to accept/reject your completed work or plan), ask_user_questions " +
+          "(ask questions before proceeding), suggest_tasks, request_checkbox_confirmation, request_item_verdicts. " +
+          "A pending interaction parks the issue until it is resolved - use this instead of guessing when you need " +
+          "a decision. For plan approvals use kind='request_confirmation' with idempotencyKey " +
+          "'confirmation:{issueId}:plan:{revisionId}' after updating the plan document.",
+        parameters: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+            kind: {
+              type: "string",
+              enum: [...INTERACTION_KINDS],
+              description: "Interaction kind. Default 'request_confirmation'.",
+            },
+            prompt: {
+              type: "string",
+              description:
+                "What you need confirmed/answered (required for request_confirmation and ask_user_questions). Max ~1000 chars.",
+            },
+            title: { type: "string", description: "Short title for the interaction (max 240 chars)." },
+            summary: { type: "string", description: "One-line context shown in the thread (max 1000 chars)." },
+            idempotencyKey: {
+              type: "string",
+              description:
+                "Stable key so retries do not duplicate the same request, e.g. 'confirmation:SUD-12:pr53' or " +
+                "'confirmation:{issueId}:plan:{revisionId}'.",
+            },
+            continuation_policy: {
+              type: "string",
+              enum: ["wake_assignee", "none"],
+              description:
+                "wake_assignee re-wakes you automatically when the interaction is resolved; none leaves the issue parked. Default depends on kind.",
+            },
+          },
+          required: ["kind"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      const kind = asString(args.kind, "request_confirmation");
+      if (!(INTERACTION_KINDS as readonly string[]).includes(kind)) {
+        return fail(`Invalid kind "${kind}". Valid: ${INTERACTION_KINDS.join(", ")}`);
+      }
+      const prompt = asString(args.prompt);
+      if ((kind === "request_confirmation" || kind === "ask_user_questions") && !prompt) {
+        return fail(`prompt is required for kind="${kind}".`);
+      }
+      // Dedupe guard: don't stack duplicate pendings on the same issue.
+      try {
+        const existing = await ctx.api.listIssueInteractions(id);
+        const rows = Array.isArray(existing)
+          ? existing
+          : ((existing as { interactions?: unknown[] } | null)?.interactions ?? []);
+        const dup = (rows as Array<Record<string, unknown>>).some(
+          (r) =>
+            r.kind === kind &&
+            r.status === "pending" &&
+            (!args.idempotencyKey || r.idempotencyKey === args.idempotencyKey),
+        );
+        if (dup) {
+          return ok({ deduped: true, message: `A pending ${kind} interaction already exists on this issue; not creating another.` });
+        }
+      } catch {
+        // Listing failed - proceed with creation; the server's idempotencyKey still protects against duplicates.
+      }
+      const body: Record<string, unknown> = {
+        kind,
+        payload: {
+          version: 1,
+          ...(prompt ? { prompt } : {}),
+        },
+      };
+      // title/summary/idempotencyKey are top-level fields on the create schema.
+      if (args.title) body.title = asString(args.title);
+      if (args.summary) body.summary = asString(args.summary);
+      if (args.idempotencyKey) body.idempotencyKey = asString(args.idempotencyKey);
+      if (args.continuation_policy && typeof args.continuation_policy === "string") {
+        body.continuationPolicy = args.continuation_policy;
+      }
+      return safeCall("issue_interaction", () => ctx.api.createIssueInteraction(id, body));
     },
   };
 }
@@ -437,6 +674,8 @@ export function buildTools(ctx: BuildToolsContext): Tool[] {
     listAgentsTool(ctx),
     hireAgentTool(ctx),
     requestApprovalTool(ctx),
+    issueInteractionTool(ctx),
+    linkApprovalTool(ctx),
   ];
 }
 
