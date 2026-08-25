@@ -281,4 +281,70 @@ export class PaperclipApi {
       approvalId,
     });
   }
+
+  // ----- Interaction lifecycle (respond / accept / reject / withdraw) -----
+  /**
+   * Answer an ask_user_questions interaction. Body:
+   * { answers: [{questionId, optionIds[], otherText?}], summaryMarkdown? }.
+   */
+  respondIssueInteraction(issueId: string, interactionId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/interactions/${encodeURIComponent(interactionId)}/respond`, body);
+  }
+
+  /** Accept a checkbox/suggest_tasks interaction. Body: {selectedClientKeys?[], selectedOptionIds?[]}. */
+  acceptIssueInteraction(issueId: string, interactionId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/interactions/${encodeURIComponent(interactionId)}/accept`, body);
+  }
+
+  /** Reject an interaction. Body: {reason?} (max 4000 chars). */
+  rejectIssueInteraction(issueId: string, interactionId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/interactions/${encodeURIComponent(interactionId)}/reject`, body);
+  }
+
+  /** Withdraw YOUR OWN pending interaction (e.g. superseded by new info). Body: {reason?}. */
+  withdrawIssueInteraction(issueId: string, interactionId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/interactions/${encodeURIComponent(interactionId)}/withdraw`, body);
+  }
+
+  // ----- Issue documents (versioned markdown: plans, specs, reports) -----
+  listIssueDocuments(issueId: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/documents`);
+  }
+
+  getIssueDocument(issueId: string, key: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`);
+  }
+
+  /**
+   * Create or update a versioned issue document (the plan-approval primitive).
+   * Schema upsertIssueDocumentSchema: {title?, format:"markdown", body<=512KB,
+   * changeSummary?<500, baseRevisionId?}. Key must match ^[a-z0-9][a-z0-9_-]*$.
+   */
+  putIssueDocument(issueId: string, key: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("PUT", `/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, body);
+  }
+
+  // ----- Work products (PRs, branches, commits, artifacts...) -----
+  /** Register a deliverable on an issue. See createIssueWorkProductSchema. */
+  createWorkProduct(issueId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/work-products`, body);
+  }
+
+  listIssueWorkProducts(issueId: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/work-products`);
+  }
+
+  // ----- Recovery actions -----
+  listRecoveryActions(issueId: string): Promise<unknown> {
+    return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/recovery-actions`);
+  }
+
+  /**
+   * Resolve an active recovery action. Schema resolveIssueRecoveryActionSchema:
+   * {actionId?, outcome: restored|false_positive|blocked|cancelled,
+   *  sourceIssueStatus: todo|done|in_review|blocked, resolutionNote?}.
+   */
+  resolveRecoveryAction(issueId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/recovery-actions/resolve`, body);
+  }
 }

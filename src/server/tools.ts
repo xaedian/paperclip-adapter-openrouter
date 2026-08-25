@@ -42,6 +42,8 @@ export interface BuildToolsContext {
   currentIssueId: string | null;
   /** When false, hire_agent and similar mutating actions go through request_approval first. */
   autoApprove: boolean;
+  /** This run's id — attributed as createdByRunId on registered work products. */
+  runIdHint?: string | null;
 }
 
 // ----- helpers -----
@@ -661,6 +663,324 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
   };
 }
 
+const INTERACTION_ACTION_KINDS = {
+  respond: "respond",
+  accept: "accept",
+  reject: "reject",
+  withdraw: "withdraw",
+} as const;
+
+/**
+ * Act on an existing issue-thread interaction.
+ *
+ * - respond: answer ask_user_questions ({questionId, optionIds[], otherText?})
+ * - accept:  accept a checkbox_confirmation / suggested tasks (selectedClientKeys / selectedOptionIds)
+ * - reject:  reject with a reason
+ * - withdraw: withdraw YOUR OWN pending interaction (superseded by new info)
+ *
+ * Note: cancelling is board-only; agents cannot cancel.
+ */
+function interactionActionTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "interaction_action",
+        description:
+          "Act on an existing issue-thread interaction. Actions: 'respond' (answer ask_user_questions questions), " +
+          "'accept' (confirm a checkbox confirmation or accept suggested tasks — use selected_option_ids for " +
+          "checkbox confirmations, selected_client_keys for suggested tasks), 'reject' (decline, with reason), " +
+          "'withdraw' (retract YOUR OWN pending request because it was superseded or posted by mistake). " +
+          "You CANNOT act on board-authored confirmations that only the board may resolve.",
+        parameters: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+            interaction_id: { type: "string", description: "Interaction id (uuid) to act on." },
+            action: {
+              type: "string",
+              enum: [...Object.keys(INTERACTION_ACTION_KINDS)],
+              description: "Which action to take.",
+            },
+            answers: {
+              type: "array",
+              description:
+                "For action='respond': [{\"questionId\": string, \"optionIds\": string[], \"other_text\": string?}] (max 20).",
+              items: {
+                type: "object",
+                properties: {
+                  questionId: { type: "string" },
+                  optionIds: { type: "array", items: { type: "string" } },
+                  otherText: { type: "string" },
+                },
+                required: ["questionId"],
+              },
+            },
+            summary_markdown: { type: "string", description: "For action='respond': optional markdown summary (max 20000)." },
+            selected_client_keys: {
+              type: "array",
+              items: { type: "string" },
+              description: "For action='accept' on suggest_tasks interactions: client keys of accepted suggestions.",
+            },
+            selected_option_ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "For action='accept' on checkbox confirmations: ids of selected options.",
+            },
+            reason: { type: "string", description: "For actions 'reject'/'withdraw': why (max 4000 chars)." },
+          },
+          required: ["interaction_id", "action"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      const interactionId = asString(args.interaction_id);
+      if (!interactionId) return fail("interaction_id is required.");
+      const action = asString(args.action);
+      if (!(action in INTERACTION_ACTION_KINDS)) {
+        return fail(`Invalid action "${action}". Valid: ${Object.keys(INTERACTION_ACTION_KINDS).join(", ")}`);
+      }
+      let body: Record<string, unknown> = {};
+      if (action === "respond") {
+        const raw = Array.isArray(args.answers) ? args.answers : [];
+        const answers = raw.map((a) => {
+          const row = (a ?? {}) as Record<string, unknown>;
+          return {
+            questionId: asString(row.questionId),
+            optionIds: Array.isArray(row.optionIds) ? row.optionIds.map(String) : [],
+            ...(row.otherText !== undefined && row.otherText !== null ? { otherText: String(row.otherText) } : {}),
+          };
+        }).filter((a) => a.questionId.length > 0);
+        if (answers.length === 0) return fail("action='respond' requires at least one answer with a questionId.");
+        body = {
+          answers,
+          ...(asString(args.summary_markdown) ? { summaryMarkdown: asString(args.summary_markdown) } : {}),
+        };
+      } else if (action === "accept") {
+        const keys = Array.isArray(args.selected_client_keys) ? args.selected_client_keys.map(String) : [];
+        const opts = Array.isArray(args.selected_option_ids) ? args.selected_option_ids.map(String) : [];
+        if (keys.length === 0 && opts.length === 0) {
+          return fail("action='accept' requires selected_client_keys (suggest_tasks) or selected_option_ids (checkbox confirmation).");
+        }
+        body = {
+          ...(keys.length > 0 ? { selectedClientKeys: keys } : {}),
+          ...(opts.length > 0 ? { selectedOptionIds: opts } : {}),
+        };
+      } else {
+        // reject / withdraw share {reason?}
+        const reason = asString(args.reason);
+        if (reason) {
+          if (reason.length > 4000) return fail("reason exceeds 4000 characters.");
+          body = { reason };
+        }
+      }
+      return safeCall(`interaction_${action}`, () => {
+        if (action === "respond") return ctx.api.respondIssueInteraction(id, interactionId, body);
+        if (action === "accept") return ctx.api.acceptIssueInteraction(id, interactionId, body);
+        if (action === "reject") return ctx.api.rejectIssueInteraction(id, interactionId, body);
+        return ctx.api.withdrawIssueInteraction(id, interactionId, body);
+      });
+    },
+  };
+}
+
+/** Issue documents: versioned markdown keyed documents (plans/specs/reports). */
+function issueDocumentTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "issue_document",
+        description:
+          "Read or write a versioned markdown document attached to an issue (keys like 'plan', 'spec', 'report'). " +
+          "Actions: 'get' (read latest + revision id), 'list', 'put' (create/update — creates a new revision). " +
+          "Plan-approval flow: PUT your updated plan document FIRST, then call issue_interaction kind=" +
+          "'request_confirmation' with idempotencyKey 'confirmation:{issueId}:plan:{revisionId}' referencing the " +
+          "newest revision id returned here.",
+        parameters: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+            action: { type: "string", enum: ["get", "list", "put"], description: "Document operation." },
+            key: {
+              type: "string",
+              description: "Document key. Lowercase letters/digits/_/- , starts alphanumeric, max 64 chars. Required for get/put.",
+            },
+            title: { type: "string", description: "For put: display title (max 200)." },
+            body: { type: "string", description: "For put: full markdown body (max 512KB)." },
+            change_summary: { type: "string", description: "For put: what changed (max 500)." },
+            base_revision_id: {
+              type: "string",
+              description: "For put: revision this edit is based on. Server rejects if someone else changed it meanwhile.",
+            },
+          },
+          required: ["action"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      const action = asString(args.action);
+      if (!["get", "list", "put"].includes(action)) {
+        return fail(`Invalid action "${action}". Valid: get, list, put`);
+      }
+      if (action === "list") {
+        return safeCall("documents_list", () => ctx.api.listIssueDocuments(id));
+      }
+      const key = asString(args.key);
+      if (!key) return fail(`key is required for action='${action}'.`);
+      if (action === "get") {
+        return safeCall("document_get", () => ctx.api.getIssueDocument(id, key));
+      }
+      // put
+      const body = asString(args.body);
+      if (!body) return fail("body is required for action='put'.");
+      if (Buffer.byteLength(body, "utf8") > 524288) {
+        return fail(`body too large (${Buffer.byteLength(body, "utf8")} bytes; max 524288).`);
+      }
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(key)) {
+        return fail("key must match ^[a-z0-9][a-z0-9_-]*$ (lowercase, max 64 chars).");
+      }
+      const payload: Record<string, unknown> = {
+        format: "markdown",
+        body,
+        ...(asString(args.title) ? { title: asString(args.title) } : {}),
+        ...(asString(args.change_summary) ? { changeSummary: asString(args.change_summary) } : {}),
+        ...(asString(args.base_revision_id) ? { baseRevisionId: asString(args.base_revision_id) } : {}),
+      };
+      return safeCall("document_put", () => ctx.api.putIssueDocument(id, key, payload));
+    },
+  };
+}
+
+/** Work products: register deliverables (PRs, branches, commits, artifacts) on an issue. */
+function workProductTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "register_work_product",
+        description:
+          "Register a deliverable produced by your work on an issue: pull_request, branch, commit, preview_url, " +
+          "runtime_service, artifact, or document. Makes the deliverable first-class so the board can review it. " +
+          "Use after opening a PR or pushing the final commit.",
+        parameters: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+            type: {
+              type: "string",
+              enum: ["preview_url", "runtime_service", "pull_request", "branch", "commit", "artifact", "document"],
+              description: "Deliverable type.",
+            },
+            provider: { type: "string", description: "Where it lives, e.g. 'github', 'vercel', 'flutter-build'. Required." },
+            title: { type: "string", description: "Human-readable title. Required." },
+            external_id: { type: "string", description: "Provider id, e.g. PR number or commit sha." },
+            url: { type: "string", description: "Link to the deliverable." },
+            status: {
+              type: "string",
+              enum: ["active", "ready_for_review", "approved", "changes_requested", "merged", "closed", "failed", "archived", "draft"],
+              description: "Default 'ready_for_review' when asking for sign-off.",
+            },
+            summary: { type: "string", description: "What it is / what to review." },
+            is_primary: { type: "boolean", description: "Mark as THE main deliverable for this issue." },
+          },
+          required: ["type", "provider", "title"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      const type = asString(args.type);
+      const provider = asString(args.provider);
+      const title = asString(args.title);
+      if (!type || !provider || !title) return fail("type, provider and title are required.");
+      const status = asString(args.status, "ready_for_review");
+      const payload: Record<string, unknown> = {
+        type,
+        provider,
+        title,
+        status,
+        ...(ctx.runIdHint ? { createdByRunId: ctx.runIdHint } : {}),
+        ...(asString(args.external_id) ? { externalId: asString(args.external_id) } : {}),
+        ...(asString(args.url) ? { url: asString(args.url) } : {}),
+        ...(asString(args.summary) ? { summary: asString(args.summary) } : {}),
+        ...(typeof args.is_primary === "boolean" ? { isPrimary: args.is_primary } : {}),
+      };
+      return safeCall("register_work_product", () => ctx.api.createWorkProduct(id, payload));
+    },
+  };
+}
+
+/** Recovery actions: list and resolve stuck-issue recovery proposals. */
+function recoveryActionTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "recovery_action",
+        description:
+          "List or resolve recovery actions on an issue. Recovery actions appear when Paperclip detects a stalled " +
+          "review path (e.g. a confirmation nobody answered). Actions: 'list' shows active proposals with their " +
+          "ids; 'resolve' closes one with an outcome: 'restored' (review path re-established — provide " +
+          "source_issue_status), 'false_positive' (nothing was actually wrong), 'blocked' (still stuck — explain), " +
+          "'cancelled' (task should be abandoned). Prefer resolving over ignoring: unresolved recovery actions keep " +
+          "the issue flagged.",
+        parameters: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+            action: { type: "string", enum: ["list", "resolve"], description: "Operation." },
+            action_id: { type: "string", description: "For resolve: the recovery action uuid (from list)." },
+            outcome: {
+              type: "string",
+              enum: ["restored", "false_positive", "blocked", "cancelled"],
+              description: "For resolve: outcome.",
+            },
+            source_issue_status: {
+              type: "string",
+              enum: ["todo", "done", "in_review", "blocked"],
+              description: "For resolve outcome='restored': the issue status after restoration (usually 'in_review').",
+            },
+            resolution_note: { type: "string", description: "Optional explanation stored with the resolution." },
+          },
+          required: ["action"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      const action = asString(args.action);
+      if (action === "list") {
+        return safeCall("recovery_list", () => ctx.api.listRecoveryActions(id));
+      }
+      if (action !== "resolve") {
+        return fail(`Invalid action "${action}". Valid: list, resolve`);
+      }
+      const outcome = asString(args.outcome);
+      if (!["restored", "false_positive", "blocked", "cancelled"].includes(outcome)) {
+        return fail("outcome must be one of restored | false_positive | blocked | cancelled.");
+      }
+      const sourceStatus = asString(args.source_issue_status, outcome === "restored" ? "in_review" : "blocked");
+      if (!["todo", "done", "in_review", "blocked"].includes(sourceStatus)) {
+        return fail("source_issue_status must be todo | done | in_review | blocked.");
+      }
+      const payload: Record<string, unknown> = {
+        outcome,
+        sourceIssueStatus: sourceStatus,
+        ...(asString(args.action_id) ? { actionId: asString(args.action_id) } : {}),
+        ...(asString(args.resolution_note) ? { resolutionNote: asString(args.resolution_note) } : {}),
+      };
+      return safeCall("recovery_resolve", () => ctx.api.resolveRecoveryAction(id, payload));
+    },
+  };
+}
+
 // ----- public API -----
 
 export function buildTools(ctx: BuildToolsContext): Tool[] {
@@ -676,6 +996,10 @@ export function buildTools(ctx: BuildToolsContext): Tool[] {
     requestApprovalTool(ctx),
     issueInteractionTool(ctx),
     linkApprovalTool(ctx),
+    interactionActionTool(ctx),
+    issueDocumentTool(ctx),
+    workProductTool(ctx),
+    recoveryActionTool(ctx),
   ];
 }
 

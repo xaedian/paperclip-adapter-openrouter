@@ -482,6 +482,29 @@ async function fetchGenerationCost(
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const config = resolveConfig(ctx);
   const { onLog, authToken } = ctx;
+  // Structured-event bridge: mirror key transcript moments into Paperclip's
+  // heartbeatRunEvents feed so the live run view renders them in real time
+  // (the raw NDJSON transcript is only fully readable after the run ends).
+  // Never let telemetry failures break the run.
+  const onEvent = ctx.onEvent;
+  const emitStructured = async (
+    eventType: string,
+    message: string | undefined,
+    payload: Record<string, unknown> | undefined,
+  ): Promise<void> => {
+    if (!onEvent) return;
+    try {
+      await onEvent({
+        eventType,
+        stream: "system",
+        level: "info",
+        ...(message !== undefined ? { message } : {}),
+        ...(payload !== undefined ? { payload } : {}),
+      });
+    } catch {
+      // Telemetry only - ignore.
+    }
+  };
   const agent = ctx.agent;
 
   const model = config.model || "openrouter/auto";
@@ -553,6 +576,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       companyId: agent.companyId,
       currentIssueId,
       autoApprove,
+      runIdHint: ctx.runId,
     });
 
     // Guarded local execution toolset (workspace-confined). Enabled by default;
@@ -576,6 +600,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   await emitInit(onLog, { model, sessionId: ctx.runId });
+  await emitStructured("adapter.init", `OpenRouter run starting (model ${model})`, {
+    adapter: "openrouter",
+    model,
+    issueId: currentIssueId,
+  });
 
   // â”€â”€ build messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -730,11 +759,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   // â”€â”€ tool loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  let lastGenerationId: string | undefined;
-  let totalUsage: UsageSummary = { inputTokens: 0, outputTokens: 0 };
+  let lastGenerationId: string | null = null;
+  let totalUsage = { inputTokens: 0, outputTokens: 0 };
   let finalAssistantText = "";
   let turn = 0;
-  let stoppedReason: "completed" | "max_turns" | "error" | "repeat_loop" = "completed";
+  let toolCallsEmitted = 0;
+  let stoppedReason: "completed" | "error" | "max_turns" | "repeat_loop" = "completed";
   let runError: { message: string; code: string; family?: ErrorFamily | null } | null = null;
 
   // Repeat-call detection: same tool + same args N times in a row breaks the
@@ -811,7 +841,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       for (const tc of toolCalls) {
         const toolName = tc.function.name;
         const args = safeParseToolArgs(tc.function.arguments);
+        toolCallsEmitted += 1;
         await emitToolCall(onLog, { name: toolName, input: args, toolUseId: tc.id });
+        await emitStructured("tool.started", `Calling ${toolName}`, {
+          toolName,
+          toolUseId: tc.id,
+          turn,
+          inputPreview: JSON.stringify(args).slice(0, 400),
+        });
 
         const tool = findTool(tools, toolName);
         let resultContent: string;
@@ -838,6 +875,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
 
         await emitToolResult(onLog, { toolUseId: tc.id, toolName, content: resultContent, isError });
+        // Structured-event mirror: keep the live run view moving in real time.
+        await emitStructured(
+          isError ? "tool.error" : "tool.completed",
+          `${toolName} ${isError ? "failed" : "completed"}`,
+          { toolName, toolUseId: tc.id, isError, turn },
+        );
         messages.push({ role: "tool", tool_call_id: tc.id, content: resultContent });
 
         const callSig = `${toolName}::${JSON.stringify(args)}`;
@@ -862,6 +905,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (turn >= maxTurns && stoppedReason === "completed") {
       stoppedReason = "max_turns";
       await writeRawStderr(onLog, `[openrouter] hit max_turns (${maxTurns}), stopping`);
+    }
+    if (stoppedReason === "completed" && toolCallsEmitted > 0) {
+      await emitStructured("run.progress", `Run finishing after ${turn} turns, ${toolCallsEmitted} tool calls`, {
+        turns: turn,
+        toolCalls: toolCallsEmitted,
+      });
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
