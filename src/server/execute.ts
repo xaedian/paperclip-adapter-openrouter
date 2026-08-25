@@ -148,8 +148,13 @@ const OPERATING_PROTOCOL =
   "idempotencyKey confirmation:{issueId}:plan:{revisionId}. Register deliverables with register_work_product " +
   "(pull_request/branch/commit/preview_url/artifact/document). Resolve stalled-review recovery_action proposals " +
   "instead of ignoring them.\n" +
-  "- Prefer the provided tools over raw REST: they validate inputs, link entities correctly, and post visible " +
-  "evidence. Raw curl bypasses guards and creates unlinked/orphaned records.";
+  "- Prefer the provided tools over raw REST: they validate inputs, link entities correctly, and post visible "
+  "evidence. Raw curl bypasses guards and creates unlinked/orphaned records.\n" +
+  "- One task per run: identify the single issue this wake is about (stated above or in the wake payload) and do "
+  "all work against it. If no issue is pinned, list your assigned issues, pick the one this wake concerns "
+  "(in_progress first, then todo), and state your choice explicitly before working.\n" +
+  "- Before requesting sign-off you MUST already be working inside that task's context, so request_approval "
+  "auto-links it. Never file an approval \"to mention an issue\" - approvals are filed FROM a task.";
 
 
 /** Merge agent-level adapterConfig over any host-level defaults. */
@@ -669,6 +674,31 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     await writeRawStderr(onLog, `[openrouter] skill loading error (continuing): ${reason}`);
+  }
+
+  // Run-context pinning (mirrors openclaw-gateway): surface the resolved issue
+  // in the prompt so the model never guesses which task it is working. Every
+  // disposition/approval call should target this issue unless the payload says
+  // otherwise.
+  let runContextBlock = "";
+  if (currentIssueId && api) {
+    let identifier: string | null = null;
+    try {
+      const issueRow = (await api.getIssue(currentIssueId)) as Record<string, unknown>;
+      if (typeof issueRow.identifier === "string") identifier = issueRow.identifier;
+    } catch {
+      /* identifier optional */
+    }
+    runContextBlock =
+      `\n\n## Run context\n` +
+      `- Pinned issue: ${identifier ?? "(id only)"} — ${currentIssueId}\n` +
+      `- ALL work this run targets the pinned issue: request_approval, update_issue_status, ` +
+      `add_comment, issue_interaction, register_work_product default to it automatically.\n` +
+      `- When filing a board approval, do NOT restate the issue inside payload; the tool ` +
+      `links the pinned issue for you. If you must reference it, use its uuid (${currentIssueId}).\n`;
+  }
+  if (systemContent.includes("Paperclip operating protocol") || systemContent.length > 0) {
+    systemContent += runContextBlock;
   }
 
   // Runtime environment facts + configured operator notes. Injected for every
