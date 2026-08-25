@@ -125,6 +125,33 @@ const DEFAULT_SYSTEM_PROMPT =
   "If you find an older approval floating without an issue link, repair it with link_approval instead of " +
   "creating a duplicate request.";
 
+/**
+ * Operating protocol appended to EVERY run's system prompt, including runs
+ * with custom instruction files (which otherwise REPLACE the default prompt).
+ * This is the single source of truth for Paperclip workflow discipline;
+ * per-agent instruction files should only carry role/company specifics.
+ */
+const OPERATING_PROTOCOL =
+  "# Paperclip operating protocol (mandatory - overrides any conflicting guidance)\n\n" +
+  "- Hand-off: when work needs human/board sign-off, call issue_interaction kind='request_confirmation' " +
+  "(payload.prompt states what to confirm), then set status='in_review'. When blocked on a decision or answer, " +
+  "call issue_interaction (kind='ask_user_questions' or 'request_confirmation') and set status='blocked'. " +
+  "A pending interaction or linked approval makes these transitions valid.\n" +
+  "- Approvals: use the request_approval tool for board sign-off - never raw REST calls. It links the approval to " +
+  "the current issue automatically (or pass link_issue_id). One decision = one card; check the thread for an " +
+  "existing pending approval before creating another. After filing, name the approval id in a comment and park " +
+  "the issue as in_review.\n" +
+  "- Completion guard: update_issue_status refuses done/cancelled while a linked approval or pending interaction " +
+  "is unresolved. Never close a task out from under an unanswered sign-off; wait, or withdraw the request first " +
+  "(issue_interaction action='withdraw') if it was a mistake.\n" +
+  "- Plan reviews: put the plan via issue_document (key='plan') first, then request_confirmation with " +
+  "idempotencyKey confirmation:{issueId}:plan:{revisionId}. Register deliverables with register_work_product " +
+  "(pull_request/branch/commit/preview_url/artifact/document). Resolve stalled-review recovery_action proposals " +
+  "instead of ignoring them.\n" +
+  "- Prefer the provided tools over raw REST: they validate inputs, link entities correctly, and post visible " +
+  "evidence. Raw curl bypasses guards and creates unlinked/orphaned records.";
+
+
 /** Merge agent-level adapterConfig over any host-level defaults. */
 function resolveConfig(ctx: AdapterExecutionContext): OpenRouterConfig & Record<string, unknown> {
   const hostConfig = (ctx.config ?? {}) as Record<string, unknown>;
@@ -611,11 +638,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const messages: ChatMessage[] = [];
   let systemContent = config.systemPrompt || DEFAULT_SYSTEM_PROMPT;
 
-  // instructionsFilePath overrides systemPrompt (mirrors claude_local et al).
+  // Custom instruction files provide ROLE/COMPANY context. They used to REPLACE
+  // the whole system prompt, which meant agents with custom files never saw the
+  // operating discipline. Now the mandatory OPERATING_PROTOCOL is always
+  // appended, so the adapter remains the single source of truth for workflow
+  // rules regardless of what an instruction file says.
   if (typeof config.instructionsFilePath === "string" && config.instructionsFilePath.trim().length > 0) {
     try {
       const fileContent = await fs.readFile(config.instructionsFilePath.trim(), "utf8");
-      if (fileContent.trim().length > 0) systemContent = fileContent.trim();
+      if (fileContent.trim().length > 0) {
+        const hasProtocol = fileContent.includes("Paperclip operating protocol");
+        systemContent = fileContent.trim() +
+          (hasProtocol ? "" : `\n\n${OPERATING_PROTOCOL}`);
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await writeRawStderr(
