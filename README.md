@@ -1,71 +1,53 @@
 # @xaedian/paperclip-adapter-openrouter
 
 **OpenRouter adapter for Paperclip** — give every agent access to 300+ models
-(50+ free) through a single OpenRouter API key, with a full multi-turn
-tool-calling loop against Paperclip's REST API.
+(50+ free) through a single OpenRouter API key, with token streaming, a full
+multi-turn tool-calling loop against Paperclip's REST API, and guarded
+workspace-local execution (shell, git, file tools, project tooling).
 
-> v2 is rewritten as a **self-contained external adapter plugin**: it installs
-> through Paperclip's Adapter Manager (npm or local path) with **zero patches**
-> to Paperclip source. The old fork-and-patch flow (cloning into
-> `packages/adapters/`, applying `REGISTRY_PATCHES.md`) is gone.
-
-Works with Paperclip `>= 2026.4xx` (plugin-store era; typechecked against
-`2026.817.0`).
+> Self-contained external adapter plugin: installs through Paperclip's Adapter
+> Manager (npm or local path). No Paperclip source patches required.
+> Typechecked against Paperclip `2026.818.0-beta.1`; works with any version
+> shipping the external-adapter plugin store (`>= 2026.40x`).
 
 ---
 
-## What it does
+## Features
 
-- **Multi-turn tool loop** — model calls tools, the adapter executes them,
-  results feed back until done, `maxTurns`, or repeat-loop protection trips
-- **9 built-in Paperclip tools** — get_issue, update_issue_status, add_comment,
-  list_comments, create_sub_issue, list_issues, list_agents, hire_agent
-  (approval-gated by default), request_approval
-- **Issue lifecycle management** — checks out the run lock, moves the issue to
-  in_progress at start and done/blocked at end
-- **Final output posted as an issue comment** so other agents and humans see it
-- **Cost tracking** — real USD cost per run via OpenRouter's `/generation` API,
-  fed into Paperclip budgets (`usageBasis: per_run`)
-- **Dynamic model discovery** — live model list from OpenRouter with static fallback
-- **Declarative config schema** — renders a native agent-config form in the UI
-  (no custom React needed)
-- **Skills** — loads SKILL.md folders from an operator-managed directory into
-  the system prompt
-- **Reasoning support** — thinking models emit separate `thinking` transcript entries
+| | |
+|---|---|
+| **Token streaming** | Live SSE deltas into the run transcript (`stream` toggle, non-stream fallback) |
+| **Local execution** | Workspace-confined `run_command` / `read_file` / `write_file` / `list_dir` with output caps and kill-on-timeout |
+| **Paperclip tools** | get_issue, update_issue_status, add_comment, list_comments, create_sub_issue, list_issues, list_agents, hire_agent (approval-gated), request_approval |
+| **Issue lifecycle** | Run-lock checkout, in_progress/done/blocked transitions, final output posted as a comment |
+| **Secrets-native** | API key resolves from the Paperclip Secrets Manager at runtime — no files, no machine env vars |
+| **Cost tracking** | Real USD cost per run via OpenRouter `/generation`, fed into budgets |
+| **Model discovery** | Full live catalog (~400 models, no key needed) with static fallback |
+| **Declarative config UI** | Native agent-form rendering without custom React |
 
-## Quick start
+## Requirements
 
-### 1. Get an OpenRouter API key
+- Paperclip `>= 2026.40x` (external adapter support)
+- An OpenRouter API key — <https://openrouter.ai/keys>
+- Node 20+ on the Paperclip host (for local-path installs)
 
-Create one at <https://openrouter.ai/keys>. Free models work at $0 balance but
-are capped (~50 requests/day); adding $5 of credits unlocks 1000 free-model
-requests/day plus paid models.
+## Install
 
-You can provide the key three ways (first match wins):
+### Option A — from npm
 
-1. **Per-agent config** `apiKey` field (supports Paperclip secret refs:
-   store it as a company secret named `OPENROUTER_API_KEY` and set the config
-   value to `{{OPENROUTER_API_KEY}}`) — recommended
-2. **Server env var** `OPENROUTER_API_KEY`
-3. Not set → runs fail fast with a clear error
+In Paperclip: **Settings → Instance → Adapters → Install Adapter → npm package**
+and enter `@xaedian/paperclip-adapter-openrouter`.
 
-### 2. Install the adapter
+Or via API:
 
-#### Option A — npm package (Adapter Manager)
+```http
+POST /api/adapters/install
+Content-Type: application/json
 
-1. Publish or install this package where your Paperclip server can reach it.
-2. In Paperclip: **Settings → Instance → Adapters → Install Adapter → npm package**
-   and enter `@xaedian/paperclip-adapter-openrouter`.
-3. Or via API:
+{ "packageName": "@xaedian/paperclip-adapter-openrouter" }
+```
 
-   ```http
-   POST /api/adapters/install
-   Content-Type: application/json
-
-   { "packageName": "@xaedian/paperclip-adapter-openrouter", "version": "latest" }
-   ```
-
-#### Option B — local path (no publishing)
+### Option B — local path
 
 ```bash
 git clone https://github.com/xaedian/paperclip-adapter-openrouter
@@ -73,62 +55,116 @@ cd paperclip-adapter-openrouter
 npm install && npm run build
 ```
 
-Then in Paperclip: **Settings → Instance → Adapters → Install Adapter → Local path**
-and select the repo folder. Or:
+Then **Install Adapter → Local path**, or:
 
 ```http
 POST /api/adapters/install
-Content-Type: application/json
-
 { "packageName": "/absolute/path/to/paperclip-adapter-openrouter", "isLocalPath": true }
 ```
 
-After install the adapter appears under External Adapters as type `openrouter`.
+## Setup
 
-### 3. Hire an agent
+### 1. Store the API key as a Paperclip secret (once)
 
-Org Chart → Hire Agent → Adapter Type **OpenRouter** → pick any model id
-(`openai/gpt-4o-mini` for best tool-calling reliability, `openai/gpt-oss-120b:free`
-for free tier) → **Test Environment** validates your key and lists models.
+Company → Secrets → create:
 
-## Agent JWT / tool-call auth
+- **Name**: `OPENROUTER_API_KEY`
+- **Value**: your `sk-or-v1-...` key
+- **Provider**: local_encrypted
 
-The adapter declares `supportsLocalAgentJwt: true`, so the host mints a scoped
-agent JWT per run (`PAPERCLIP_AGENT_JWT_SECRET` must be set on the server for
-this to work). The adapter uses that JWT **only** to call Paperclip's REST API
-as the agent. Your OpenRouter key never touches Paperclip and the JWT is never
-sent to OpenRouter.
+The adapter resolves this at runtime through the agent's own governed
+secrets surface (`POST /api/agents/me/secrets/:key/value`). Nothing is stored
+in plaintext files, machine environment variables, or agent configs.
+
+### 2. Grant each agent access to the secret ⚠️ required
+
+Access is **per-agent and opt-in** (governance feature):
+
+**Agent → Secrets → API Access → OPENROUTER_API_KEY → allow**
+
+Repeat for every agent that should use OpenRouter. There is currently no
+bulk/auto-grant in Paperclip (see [Troubleshooting](#troubleshooting)).
+
+### 3. Configure the agent
+
+Org Chart → Hire Agent → Adapter Type **OpenRouter** → pick a model.
+Set the agent's *API key* field to `{{OPENROUTER_API_KEY}}` (or leave it blank
+if you want this specific agent hard-blocked until you paste its own key).
+Use **Test Environment** to validate connectivity — it reports the tier the
+key came from and lists available models.
+
+Per-agent key overrides still work: paste a different literal key (or another
+`{{SECRET_NAME}}`) into an individual agent to give it its own billing identity.
+
+## Environment variables surfaced to agents
+
+The adapter injects real runtime facts into every prompt automatically:
+
+| Variable | Injected as |
+|---|---|
+| `COMSPEC` | Shell location (cmd.exe on Windows) |
+| `FLUTTER_ROOT` | Flutter SDK root |
+| `SUDOKU_REPO` *(example — any var you set)* | Project paths |
+| *(derived)* | Workspace root for the run |
+
+Set these once at the OS level (User environment variables); agents discover
+them without any prompt engineering. On Windows the prompt also documents the
+two classic gotchas: shells run **cmd.exe** (not git-bash), and PATH
+assignments must be quoted (`set "PATH=%PATH%;..."`) because PATH entries can
+contain parentheses.
 
 ## Configuration reference
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `model` | string | `openrouter/auto` | Any OpenRouter model id. `:free` suffix = free tier. |
-| `apiKey` | string | env var | `sk-or-v1-...`. Supports `{{SECRET_REF}}`. |
+| `apiKey` | string | — | **Per-agent override only.** Literal key or `{{SECRET_NAME}}`. Leave blank for fleet default. |
+| `stream` | boolean | `true` | SSE token streaming into the transcript. |
+| `enableLocalExec` | boolean | `true` | Workspace-confined exec tools (see below). |
+| `workspaceDir` | string | host-managed per-agent workspace | Absolute root for exec tools. |
 | `systemPrompt` | string | sensible default | Base system message. |
 | `instructionsFilePath` | string | — | Markdown file used as system prompt (overrides `systemPrompt`). |
 | `temperature` | number | `0.7` | Sampling temperature. |
-| `maxTokens` | number | `4096` | Max completion tokens per turn. |
+| `maxTokens` | number | `16384` | Auto-clamped to the model's advertised maximum. |
 | `topP` | number | `1` | Nucleus sampling. |
-| `maxTurns` | number | `25` | Max tool-loop round-trips per run. |
-| `requestTimeoutSec` | number | `300` | Per-request timeout. |
+| `maxTurns` | number | `30` | Max tool-loop round-trips per run. |
+| `requestTimeoutSec` | number | `600` | Per-request timeout. |
 | `reasoning` | boolean | `false` | Extended thinking (reasoning-capable models). |
 | `transforms` | string[] | — | e.g. `["middle-out"]`. |
-| `route` | string | `fallback` | `"fallback"` or `"no-fallback"`. |
-| `autoApprove` | boolean | `false` | Skip approval gate on `hire_agent`. Keep off in production. |
-| `skillsDir` | string | `~/.openrouter-adapter/skills` | Skills root scanned for SKILL.md folders. |
+| `route` | string | `fallback` | `fallback` / `no-fallback` (legacy value auto-mapped). |
+| `autoApprove` | boolean | `false` | Skip approval gate on `hire_agent`. |
+| `skillsDir` | string | `~/.openrouter-adapter/skills` | SKILL.md folders injected into prompts. |
+| `environmentNotes` | string | — | Extra facts appended to every run's Environment block. Fleet-wide tier lives in `~/.openrouter-adapter/config.json`. |
+
+## Local execution tools
+
+When enabled, four tools operate strictly inside the agent's workspace:
+
+- `run_command` — shell execution (cmd.exe on Windows), output capped at
+  200 KB, process-tree kill at timeout (default 120 s, max 900 s)
+- `read_file` / `write_file` — UTF-8 text, 1 MB cap, parent dirs auto-created
+- `list_dir` — capped at 500 entries
+
+Path traversal outside the workspace root is denied. Point an agent at a real
+project with `workspaceDir` (e.g. `C:\Users\darre\Documents\sudoku_remixxed`)
+and it can build, test, and commit like a CLI-based agent — while staying
+pure HTTP.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `API key not found in any tier` | Secret missing, or the agent hasn't been granted access (step 2 above). The run log shows `secret tier:` diagnostics when enabled builds. |
+| Writes rejected: `Responsible user is unavailable` | Beta governance quirk affecting bundled-routine wakes; assignment/comment-driven wakes stamp correctly. |
+| `spawn npm ENOENT` during install | Upstream Windows bug in the installer route — use local-path install instead. |
+| Empty output, `finish_reason=length` | Model exhausted its token budget (often on reasoning). Raise `maxTokens`. |
+| Free model "fakes" tool calls as text | Model limitation — use `openai/gpt-oss-120b:free` or `gpt-4o-mini`. |
 
 ## Known limitations
 
-- **No token streaming inside the loop** — non-streaming is more reliable for
-  tool calls across heterogeneous models.
-- **Some free models fake tool calls** (emit `<tool_call>` as plain text).
-  Use `openai/gpt-oss-120b:free` or `openai/gpt-4o-mini` if tool calling misbehaves.
-- **Free-tier rate limits** are enforced by OpenRouter (429s are retried once,
-  then surface as `provider_quota` errors).
-- **No async approval resume** — a run that requests an approval completes;
-  the outcome applies on the next wake.
-- **No vision/multimodal attachments.**
+- Non-streaming inside tool-result round-trips (deltas stream for assistant/thinking text).
+- No async approval resume; no vision/multimodal attachments.
+- Repeat-call protection trips after 3 identical consecutive calls.
 
 ## Development
 
@@ -136,19 +172,15 @@ sent to OpenRouter.
 npm install
 npm run typecheck
 npm run build
-node smoke.mjs   # optional manual check
 ```
 
-The package depends only on the public `@paperclipai/adapter-utils` (the same
-dependency first-party external adapters use), so it tracks Paperclip releases
-without patching. Contract types (`AdapterExecutionContext`,
-`AdapterExecutionResult`, `ServerAdapterModule`, ...) come from that package.
+Depends only on the public `@paperclipai/adapter-utils`.
 
 ## Credits
 
-Forked from [talhamahmood666/paperclip-adapter-openrouter](https://github.com/talhamahmood666/paperclip-adapter-openrouter)
-(v2 tool-loop implementation), modernized for Paperclip's external adapter
-plugin system.
+Forked from
+[talhamahmood666/paperclip-adapter-openrouter](https://github.com/talhamahmood666/paperclip-adapter-openrouter)
+and modernized for Paperclip's external adapter plugin system.
 
 ## License
 

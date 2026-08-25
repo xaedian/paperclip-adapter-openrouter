@@ -23,13 +23,18 @@ export function maskKey(key: string): string {
  */
 export const SECRET_BINDING_CONFIG_KEY = "openrouterApiKeySecret";
 
+/** Fleet-default secret consulted when adapterConfig.apiKey is blank.
+ *  Granted via Agent > Secrets > API Access. */
+export const DEFAULT_SECRET_NAME = "OPENROUTER_API_KEY";
+
 /**
  * API key resolution - Paperclip Secrets Manager ONLY:
  *   1. Literal non-ref string in adapterConfig.apiKey (per-agent override)
  *   2. Paperclip secret resolved via the agent's granted-secrets runtime
- *      surface, targeted by either the {{SECRET_NAME}} reference in
- *      adapterConfig.apiKey or the binding object in
- *      adapterConfig[SECRET_BINDING_CONFIG_KEY].
+ *      surface, targeted by the {{SECRET_NAME}} reference in
+ *      adapterConfig.apiKey, the companion binding object, or -
+ *      when neither is present - DEFAULT_SECRET_NAME. A granted agent
+ *      therefore needs no key material in its config at all.
  *
  * No environment-variable or file-based tiers exist by design.
  */
@@ -50,7 +55,9 @@ export async function resolveOpenRouterApiKey(
     }
   }
 
-  // Derive the secret name / id from whichever reference shape is present.
+  // Derive the secret name / id from whichever reference shape is present;
+  // fall back to the fleet-default secret name so a granted agent works
+  // with a completely empty apiKey field.
   let name: string | null = null;
   let secretId: string | null = null;
   if (typeof raw === "string") {
@@ -62,6 +69,7 @@ export async function resolveOpenRouterApiKey(
   }
   const binding = config?.[SECRET_BINDING_CONFIG_KEY] as Record<string, unknown> | undefined;
   if (!secretId && binding && typeof binding.secretId === "string") secretId = binding.secretId;
+  if (!name && !secretId) name = DEFAULT_SECRET_NAME;
   if ((name || secretId) && ctx?.api) {
     const dbg = async (m: string) => {
       if (ctx.onLog) await ctx.onLog("stderr", `[openrouter] secret tier: ${m}\n`);
