@@ -511,7 +511,10 @@ async function fetchGenerationCost(
 
 // â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+const ADAPTER_BUILD_MARKER = "openrouter-adapter-build-v2.9.0";
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  await writeRawStderr(ctx.onLog, `[openrouter] ${ADAPTER_BUILD_MARKER}`);
   const config = resolveConfig(ctx);
   const { onLog, authToken } = ctx;
   // Structured-event bridge: mirror key transcript moments into Paperclip's
