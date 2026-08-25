@@ -201,75 +201,120 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
           );
         }
       }
-      // Self-healing in_review: if the server rejects with
-      // invalid_issue_disposition, check whether THIS agent created a pending
-      // approval that ended up unlinked (heartbeat wakes lose issue context).
-      // Exactly one candidate matching this issue's identifier -> link it and
-      // retry. Otherwise fail with an actionable message.
-      const first = await ctx.api.updateIssue(id, { status }).then(
-        (r) => ({ ok: true as const, r }),
-        (err: unknown) => ({ ok: false as const, err }),
-      );
-      if (first.ok) {
-        return safeCall("update_issue_status", () => Promise.resolve(first.r));
-      }
-      const errText = first.err instanceof Error ? first.err.message : String(first.err);
-      if (!(status === "in_review" && errText.includes("invalid_issue_disposition"))) {
-        return safeCall("update_issue_status", () => Promise.reject(first.err));
-      }
+      // Pre-flight in_review/blocked gate check: these transitions require a
+      // review path ON THIS ISSUE (pending linked approval or interaction).
+      // Check BEFORE calling the API so agents never see a raw 422.
+      if (status === "in_review" || status === "blocked") {
+        const hasReviewPath = await (async () => {
+          try {
+            const approvals = await ctx.api.listIssueApprovals(id);
+            const rows = Array.isArray(approvals)
+              ? (approvals as Array<Record<string, unknown>>)
+              : (((approvals as Record<string, unknown> | null)?.approvals ??
+                  (approvals as Record<string, unknown> | null)?.items ??
+                  []) as Array<Record<string, unknown>>);
+            if (
+              rows.some(
+                (a) => a.status === "pending" || a.status === "revision_requested",
+              )
+            )
+              return true;
+          } catch {
+            return true; // can't verify -> let the server decide
+          }
+          try {
+            const interactions = await ctx.api.listIssueInteractions(id);
+            const irows = Array.isArray(interactions)
+              ? (interactions as Array<Record<string, unknown>>)
+              : (((interactions as Record<string, unknown> | null)?.interactions ??
+                  (interactions as Record<string, unknown> | null)?.items ??
+                  []) as Array<Record<string, unknown>>);
+            return irows.some((it) => it.status === "pending");
+          } catch {
+            return true; // can't verify -> let the server decide
+          }
+        })();
 
-      let pendingUnlinked: Array<Record<string, unknown>> = [];
-      try {
-        const all = await ctx.api.listCompanyApprovals(ctx.companyId);
-        const rows = Array.isArray(all)
-          ? (all as Array<Record<string, unknown>>)
-          : (((all as Record<string, unknown>)?.approvals ?? []) as Array<Record<string, unknown>>);
-        pendingUnlinked = rows.filter((a) => a.status === "pending" && a.requestedByAgentId === ctx.agentId);
-      } catch {
-        // fall through to original error below
-      }
+        if (!hasReviewPath) {
+          // Self-heal: find a pending approval created by THIS agent that is
+          // unlinked and references this issue (by identifier or uuid), link
+          // it, and proceed. This repairs heartbeat-wake filings that lost
+          // their issue context.
+          let healed = false;
+          try {
+            const all = await ctx.api.listCompanyApprovals(ctx.companyId);
+            const rows = Array.isArray(all)
+              ? (all as Array<Record<string, unknown>>)
+              : (((all as Record<string, unknown>)?.approvals ?? []) as Array<Record<string, unknown>>);
+            const mine = rows.filter(
+              (a) => a.status === "pending" && a.requestedByAgentId === ctx.agentId,
+            );
+            let ident: string | null = null;
+            try {
+              const issueRow = (await ctx.api.getIssue(id)) as Record<string, unknown>;
+              if (typeof issueRow.identifier === "string")
+                ident = issueRow.identifier.toUpperCase();
+            } catch {
+              /* identifier optional */
+            }
+            const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const matches = mine.filter((a) => {
+              const pl = (a.payload ?? {}) as Record<string, unknown>;
+              const refs = [
+                pl.issue,
+                pl.issue_key,
+                pl.issueKey,
+                pl.sourceIssueId,
+                pl.issue_id,
+                ...(Array.isArray(pl.issueIds) ? (pl.issueIds as unknown[]) : []),
+              ].filter((r): r is string => typeof r === "string");
+              return refs.some(
+                (r) =>
+                  r.trim().toUpperCase() === ident ||
+                  (uuidRe.test(r.trim()) && r.trim() === id),
+              );
+            });
+            const target = matches[0] ?? mine.find((a) => !linkedCache.has(a.id as string));
+            if (target && typeof target.id === "string") {
+              await ctx.api.linkIssueApproval(id, target.id);
+              linkedCache.set(target.id, id);
+              healed = true;
+            }
+          } catch {
+            /* fall through with healed=false */
+          }
 
-      let target: Record<string, unknown> | undefined;
-      try {
-        const issueRow = (await ctx.api.getIssue(id)) as Record<string, unknown>;
-        const ident = typeof issueRow.identifier === "string" ? issueRow.identifier.toUpperCase() : null;
-        if (ident) {
-          const matches = pendingUnlinked.filter((a) => {
-            const pl = (a.payload ?? {}) as Record<string, unknown>;
-            const refs = [pl.issue, pl.issue_key, pl.issueKey, pl.sourceIssueId, pl.issue_id];
-            return refs.some((r) => typeof r === "string" && r.trim().toUpperCase() === ident);
-          });
-          target = matches[0] ?? pendingUnlinked.find((a) => !linkedCache.has(a.id as string));
+          if (!healed) {
+            let names = "";
+            try {
+              const all = await ctx.api.listCompanyApprovals(ctx.companyId);
+              const rows = Array.isArray(all)
+                ? (all as Array<Record<string, unknown>>)
+                : (((all as Record<string, unknown>)?.approvals ?? []) as Array<Record<string, unknown>>);
+              names = rows
+                .filter((a) => a.status === "pending" && a.requestedByAgentId === ctx.agentId)
+                .slice(0, 5)
+                .map((a) => {
+                  const pl = (a.payload ?? {}) as Record<string, unknown>;
+                  const ref = [pl.issue, pl.issue_key, pl.sourceIssueId].find(
+                    (r) => typeof r === "string",
+                  );
+                  return `${(a.id as string).slice(0, 8)}${ref ? ` (${ref})` : ""}`;
+                })
+                .join("; ");
+            } catch {
+              /* names optional */
+            }
+            return fail(
+              `Cannot move to in_review yet: this issue has no review path (no pending linked approval or interaction).` +
+                (names
+                  ? ` Your unlinked pending approval(s): ${names} — re-file with request_approval from this task's context, or use link_approval to attach one here first.`
+                  : ` Create a request_confirmation via issue_interaction, or file request_approval while working this task.`),
+              { missingReviewPath: true },
+            );
+          }
         }
-      } catch {
-        // keep undefined; actionable failure below
       }
-
-      if (target && typeof target.id === "string") {
-        try {
-          await ctx.api.linkIssueApproval(id, target.id);
-          linkedCache.set(target.id, id);
-          const retry = await ctx.api.updateIssue(id, { status });
-          return safeCall("update_issue_status", () => Promise.resolve(retry));
-        } catch {
-          // fall through to actionable failure below
-        }
-      }
-
-      const names = pendingUnlinked
-        .slice(0, 5)
-        .map((a) => {
-          const pl = (a.payload ?? {}) as Record<string, unknown>;
-          const ref = [pl.issue, pl.issue_key, pl.sourceIssueId].find((r) => typeof r === "string");
-          return `${(a.id as string).slice(0, 8)}${ref ? ` (${ref})` : ""}`;
-        })
-        .join("; ");
-      return fail(
-        `Cannot move to in_review: no review path on this issue.` +
-          (pendingUnlinked.length
-            ? ` You have ${pendingUnlinked.length} pending approval(s) you created that are not linked: ${names}. Re-file them with request_approval while working the task so they link.`
-            : ` Create a request_confirmation interaction via issue_interaction, or file request_approval from the task context.`),
-      );
       // Post the reason as a comment so the explanation is visible in-thread.
       const reasonText = asString(args.reason);
       const posted = await ctx.api
