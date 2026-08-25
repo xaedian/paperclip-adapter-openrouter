@@ -497,8 +497,9 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
             link_issue_id: {
               type: "string",
               description:
-                "Optional issue id to link the approval to. Defaults to the current issue. " +
-                "Pass the empty string to create the approval without any issue link.",
+                "REQUIRED-ISH: the issue this approval gates, as a top-level argument (uuid). " +
+                "Do NOT bury issue ids inside payload - they are hoisted as a fallback, but passing " +
+                "link_issue_id explicitly is the reliable path. Omit only to use the current issue.",
             },
           },
           required: ["type", "summary"],
@@ -508,17 +509,38 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
     execute: async (args) => {
       const type = asString(args.type);
       const summary = asString(args.summary);
-      if (!type) return fail("type is required and must be hire_agent / approve_ceo_strategy / budget_override_required.");
+      if (!type) return fail("type is required and must be hire_agent / approve_ceo_strategy / budget_override_required / request_board_approval.");
       if (!summary) return fail("summary is required.");
-      // Linking: default to the current issue; explicit link_issue_id overrides;
-      // explicit empty string opts out of linking entirely.
+      // Linking resolution order:
+      //   1. explicit link_issue_id arg (top-level)
+      //   2. current issue
+      //   3. models frequently nest issueIds / sourceIssueId / issue_id INSIDE
+      //      payload — hoist them out so linkage actually happens instead of
+      //      being silently dropped by the server schema.
       let issueIds: string[] = [];
       if (typeof args.link_issue_id === "string") {
         if (args.link_issue_id.trim().length > 0) issueIds = [args.link_issue_id.trim()];
       } else if (ctx.currentIssueId) {
         issueIds = [ctx.currentIssueId];
       }
-      const payload = (args.payload && typeof args.payload === "object" ? args.payload : {}) as Record<string, unknown>;
+      const rawPayload = (args.payload && typeof args.payload === "object" ? args.payload : {}) as Record<string, unknown>;
+      if (issueIds.length === 0) {
+        const hint = Array.isArray(rawPayload.issueIds)
+          ? rawPayload.issueIds
+          : Array.isArray(rawPayload.issue_ids)
+            ? rawPayload.issue_ids
+            : undefined;
+        if (hint) {
+          issueIds = hint.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+        } else if (typeof rawPayload.sourceIssueId === "string" && rawPayload.sourceIssueId.trim()) {
+          issueIds = [rawPayload.sourceIssueId.trim()];
+        } else if (typeof rawPayload.issue_id === "string" && rawPayload.issue_id.trim()) {
+          issueIds = [rawPayload.issue_id.trim()];
+        }
+      }
+      // Strip linkage hints from the persisted payload (server stores it verbatim;
+      // keeping stale copies invites future confusion).
+      const { issueIds: _drop1, issue_ids: _drop2, sourceIssueId: _drop3, issue_id: _drop4, ...payload } = rawPayload;
       const approval = await safeCall("request_approval", () =>
         ctx.api.createApproval(ctx.companyId, {
           type,
@@ -527,9 +549,8 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
           payload: { ...payload, summary },
         }),
       );
-      // Self-healing linkage: if creation succeeded but the server dropped the
-      // link (older host, race with run checkout), verify and repair via the
-      // agent-accessible POST /issues/:id/approvals route.
+      // Self-healing linkage: verify the server actually linked, and repair via
+      // POST /issues/:id/approvals if not. Covers older hosts and any race.
       if (!approval.isError && issueIds.length > 0) {
         try {
           const created = JSON.parse(approval.content) as { id?: string };
