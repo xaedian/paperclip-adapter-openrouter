@@ -538,6 +538,39 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
           issueIds = [rawPayload.issue_id.trim()];
         }
       }
+      // Models often reference issues by human key ("REP-1") rather than uuid.
+      // Resolve any non-uuid candidates through the company issue list.
+      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const needsResolve = issueIds.some((v) => !uuidRe.test(v));
+      const keyHint =
+        typeof rawPayload.issue === "string" ? rawPayload.issue :
+        typeof rawPayload.issue_key === "string" ? rawPayload.issue_key :
+        typeof rawPayload.issueKey === "string" ? rawPayload.issueKey :
+        null;
+      if (needsResolve || (!issueIds.length && keyHint)) {
+        try {
+          const listing = await ctx.api.listCompanyIssues(ctx.companyId, { limit: "200" });
+          const rowsRaw = Array.isArray(listing)
+            ? listing
+            : (((listing as Record<string, unknown> | null)?.issues ??
+                (listing as Record<string, unknown> | null)?.items ??
+                []) as Array<Record<string, unknown>>);
+          const byKeyOrId = new Map<string, string>();
+          for (const row of rowsRaw) {
+            const id = typeof row.id === "string" ? row.id : "";
+            const ident = typeof row.identifier === "string" ? row.identifier.toUpperCase() : "";
+            if (id && ident) byKeyOrId.set(ident, id);
+          }
+          const resolved: string[] = [];
+          for (const cand of issueIds.length ? issueIds : [keyHint as string]) {
+            const asUuid = uuidRe.test(cand) ? cand : byKeyOrId.get(cand.trim().toUpperCase());
+            if (asUuid) resolved.push(asUuid);
+          }
+          if (resolved.length > 0) issueIds = resolved;
+        } catch {
+          // resolution is best-effort; keep whatever uuids we already have
+        }
+      }
       // Strip linkage hints from the persisted payload (server stores it verbatim;
       // keeping stale copies invites future confusion).
       const { issueIds: _drop1, issue_ids: _drop2, sourceIssueId: _drop3, issue_id: _drop4, ...payload } = rawPayload;
