@@ -5,7 +5,7 @@
 //      surface, referenced by {{SECRET_NAME}} or a secret_ref binding
 // ─────────────────────────────────────────────────────────────────
 
-export type OpenRouterKeySource = "agent_config_literal" | "paperclip_secret";
+export type OpenRouterKeySource = "agent_config_literal" | "paperclip_env" | "paperclip_secret";
 
 export interface ResolvedOpenRouterKey {
   key: string;
@@ -30,13 +30,14 @@ export const DEFAULT_SECRET_NAME = "OPENROUTER_API_KEY";
 /**
  * API key resolution - Paperclip Secrets Manager ONLY:
  *   1. Literal non-ref string in adapterConfig.apiKey (per-agent override)
- *   2. Paperclip secret resolved via the agent's granted-secrets runtime
- *      surface, targeted by the {{SECRET_NAME}} reference in
- *      adapterConfig.apiKey, the companion binding object, or -
- *      when neither is present - DEFAULT_SECRET_NAME. A granted agent
- *      therefore needs no key material in its config at all.
+ *   2. Paperclip-resolved environment variable: adapterConfig.env
+ *      .OPENROUTER_API_KEY declared as {type:"secret_ref",secretId} - the
+ *      host swaps in the real value before the adapter sees it.
+ *   3. {{SECRET_NAME}} / secret_ref / fleet-default resolution via the
+ *      agent's granted-secrets runtime surface.
  *
- * No environment-variable or file-based tiers exist by design.
+ * No OS-env or file-based tiers exist by design. Grants are managed via
+ * Agent > Secrets > API Access (or the env binding above).
  */
 export async function resolveOpenRouterApiKey(
   config: Record<string, unknown>,
@@ -53,6 +54,12 @@ export async function resolveOpenRouterApiKey(
     if (trimmed && !trimmed.startsWith("{{")) {
       return { key: trimmed, source: "agent_config_literal" };
     }
+  }
+
+  // Paperclip-resolved environment variable (secret_ref swapped by host).
+  const envVal = (config?.env as Record<string, unknown> | undefined)?.OPENROUTER_API_KEY;
+  if (typeof envVal === "string" && envVal.trim().length > 0 && !envVal.startsWith("{{")) {
+    return { key: envVal.trim(), source: "paperclip_env" };
   }
 
   // Derive the secret name / id from whichever reference shape is present;
