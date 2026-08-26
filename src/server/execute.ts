@@ -1,4 +1,4 @@
-﻿/**
+/**
  * OpenRouter adapter execute() â€” multi-turn tool-calling loop.
  *
  * Restored from the originally-verified v2 implementation and updated for
@@ -886,7 +886,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ? async (entry: unknown) => {
         try {
           const ev = ctx.onEvent;
-          if (ev) await ev({ eventType: "transcript.entry", stream: "system", level: "info", payload: { entry } });
+          if (ev) await ev({ eventType: "adapter.stdout", stream: "stdout", level: "info", message: JSON.stringify(entry) });
         } catch {
           // Live view feed only - never break the run over telemetry.
         }
