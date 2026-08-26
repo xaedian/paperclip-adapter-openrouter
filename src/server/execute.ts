@@ -448,11 +448,11 @@ async function chatTurnStream(
       const delta = choice.delta ?? {};
       if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) {
         outcome.reasoning += delta.reasoning;
-        await onLog("stdout", delta.reasoning + "\n");
+        await emitThinking(onLog, delta.reasoning, { delta: true });
       }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         outcome.content += delta.content;
-        await onLog("stdout", delta.content + "\n");
+        await emitAssistant(onLog, delta.content, { delta: true });
       }
       if (delta.tool_calls?.length) mergeToolCallDeltas(acc, delta.tool_calls);
     }
