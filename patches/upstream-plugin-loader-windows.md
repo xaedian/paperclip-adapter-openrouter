@@ -1,4 +1,4 @@
-# Upstream bug: external adapters cannot load on native Windows
+﻿# Upstream bug: external adapters cannot load on native Windows
 
 Applies to Paperclip v2026.817.0 (`@paperclipai/server/dist/adapters/plugin-loader.js`).
 
@@ -22,7 +22,7 @@ Step 2 - restart Paperclip at your leisure (this is the only downtime).
 Step 3 - install the adapter (no rebuild needed; repo already built):
 
 ```powershell
-$body = @{ packageName = "C:\Users\darre\projects\paperclip-adapter-openrouter"; isLocalPath = $true } | ConvertTo-Json
+$body = @{ packageName = "<repo-local-path>"; isLocalPath = $true } | ConvertTo-Json
 Invoke-RestMethod -Uri "http://127.0.0.1:3100/api/adapters/install" -Method POST -ContentType "application/json" -Body $body
 # expect: type=openrouter, requiresRestart=false
 ```

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tool definitions and handlers for the OpenRouter adapter.
  *
  * Architecture:
@@ -45,7 +45,7 @@ export interface BuildToolsContext {
   currentIssueId: string | null;
   /** When false, hire_agent and similar mutating actions go through request_approval first. */
   autoApprove: boolean;
-  /** This run's id — attributed as createdByRunId on registered work products. */
+  /** This run's id â€” attributed as createdByRunId on registered work products. */
   runIdHint?: string | null;
 }
 
@@ -308,7 +308,7 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
             return fail(
               `Cannot move to in_review yet: this issue has no review path (no pending linked approval or interaction).` +
                 (names
-                  ? ` Your unlinked pending approval(s): ${names} — re-file with request_approval from this task's context, or use link_approval to attach one here first.`
+                  ? ` Your unlinked pending approval(s): ${names} â€” re-file with request_approval from this task's context, or use link_approval to attach one here first.`
                   : ` Create a request_confirmation via issue_interaction, or file request_approval while working this task.`),
               { missingReviewPath: true },
             );
@@ -585,7 +585,7 @@ function listAgentsTool(ctx: BuildToolsContext): Tool {
     execute: async () => {
       return safeCall("list_agents", async () => {
         const agents = await ctx.api.listCompanyAgents(ctx.companyId);
-        // Trim to fields the model actually needs — full agent objects can be huge
+        // Trim to fields the model actually needs â€” full agent objects can be huge
         // and waste context window on hundreds of irrelevant runtime config keys.
         return agents.map((a) => ({
           id: a.id,
@@ -644,7 +644,7 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
       //   1. explicit link_issue_id arg (top-level)
       //   2. current issue
       //   3. models frequently nest issueIds / sourceIssueId / issue_id INSIDE
-      //      payload — hoist them out so linkage actually happens instead of
+      //      payload â€” hoist them out so linkage actually happens instead of
       //      being silently dropped by the server schema.
       let issueIds: string[] = [];
       if (typeof args.link_issue_id === "string") {
@@ -745,7 +745,7 @@ const INTERACTION_KINDS = [
 ] as const;
 
 /**
- * Issue-thread interaction tool — THE canonical review path.
+ * Issue-thread interaction tool â€” THE canonical review path.
  *
  * A pending interaction satisfies Paperclip's disposition gate so the agent
  * can legitimately move an issue to in_review or blocked ("waiting for
@@ -871,7 +871,7 @@ function interactionActionTool(ctx: BuildToolsContext): Tool {
         name: "interaction_action",
         description:
           "Act on an existing issue-thread interaction. Actions: 'respond' (answer ask_user_questions questions), " +
-          "'accept' (confirm a checkbox confirmation or accept suggested tasks — use selected_option_ids for " +
+          "'accept' (confirm a checkbox confirmation or accept suggested tasks â€” use selected_option_ids for " +
           "checkbox confirmations, selected_client_keys for suggested tasks), 'reject' (decline, with reason), " +
           "'withdraw' (retract YOUR OWN pending request because it was superseded or posted by mistake). " +
           "You CANNOT act on board-authored confirmations that only the board may resolve.",
@@ -978,7 +978,7 @@ function issueDocumentTool(ctx: BuildToolsContext): Tool {
         name: "issue_document",
         description:
           "Read or write a versioned markdown document attached to an issue (keys like 'plan', 'spec', 'report'). " +
-          "Actions: 'get' (read latest + revision id), 'list', 'put' (create/update — creates a new revision). " +
+          "Actions: 'get' (read latest + revision id), 'list', 'put' (create/update â€” creates a new revision). " +
           "Plan-approval flow: PUT your updated plan document FIRST, then call issue_interaction kind=" +
           "'request_confirmation' with idempotencyKey 'confirmation:{issueId}:plan:{revisionId}' referencing the " +
           "newest revision id returned here.",
@@ -1059,7 +1059,7 @@ function workProductTool(ctx: BuildToolsContext): Tool {
               enum: ["preview_url", "runtime_service", "pull_request", "branch", "commit", "artifact", "document"],
               description: "Deliverable type.",
             },
-            provider: { type: "string", description: "Where it lives, e.g. 'github', 'vercel', 'flutter-build'. Required." },
+            provider: { type: "string", description: "Where it lives, e.g. 'github', 'vercel', 'ci'. Required." },
             title: { type: "string", description: "Human-readable title. Required." },
             external_id: { type: "string", description: "Provider id, e.g. PR number or commit sha." },
             url: { type: "string", description: "Link to the deliverable." },
@@ -1109,8 +1109,8 @@ function recoveryActionTool(ctx: BuildToolsContext): Tool {
         description:
           "List or resolve recovery actions on an issue. Recovery actions appear when Paperclip detects a stalled " +
           "review path (e.g. a confirmation nobody answered). Actions: 'list' shows active proposals with their " +
-          "ids; 'resolve' closes one with an outcome: 'restored' (review path re-established — provide " +
-          "source_issue_status), 'false_positive' (nothing was actually wrong), 'blocked' (still stuck — explain), " +
+          "ids; 'resolve' closes one with an outcome: 'restored' (review path re-established â€” provide " +
+          "source_issue_status), 'false_positive' (nothing was actually wrong), 'blocked' (still stuck â€” explain), " +
           "'cancelled' (task should be abandoned). Prefer resolving over ignoring: unresolved recovery actions keep " +
           "the issue flagged.",
         parameters: {

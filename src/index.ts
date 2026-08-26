@@ -172,6 +172,8 @@ export interface OpenRouterConfig {
   workspaceDir?: string;
   /** Extra environment notes injected into every run's system prompt (machine quirks, tool paths). Shared file tier: ~/.openrouter-adapter/config.json .environmentNotes */
   environmentNotes?: string;
+  /** OS env var names surfaced into the Environment block when set on the host. Shared file tier: ~/.openrouter-adapter/config.json .environmentVars. Default ["COMSPEC"]. */
+  environmentVars?: string[];
   /** Override path to skills directory. Default ~/.openrouter-adapter/skills */
   skillsDir?: string;
   /** Absolute path to a markdown file read at runtime and used as the system prompt (overrides systemPrompt). */

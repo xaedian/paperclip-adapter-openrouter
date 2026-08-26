@@ -6,7 +6,7 @@ reached? The init one is right after emitInit. Add a probe: check whether OUR
 dist/execute.js has the onEvent wiring (built output)."""
 import re
 
-src = open(r"C:\Users\darre\projects\paperclip-adapter-openrouter\dist\server\execute.js", encoding="utf-8").read()
+src = open(r".\dist\server\execute.js", encoding="utf-8").read()
 print("onEvent occurrences in dist:", len(re.findall(r"onEvent", src)))
 i = src.find("emitStructured")
 print(src[i:i+700])

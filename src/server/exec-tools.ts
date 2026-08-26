@@ -52,7 +52,7 @@ export function sharedConfigPath(): string {
   return path.join(home, ".openrouter-adapter", "config.json");
 }
 
-function collectNotes(v: unknown): string[] {
+function collectStrings(v: unknown): string[] {
   if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
   if (typeof v === "string" && v.trim().length > 0) return [v];
   return [];
@@ -74,20 +74,27 @@ export function buildEnvironmentBlock(
   if (workspaceRoot) {
     lines.push(`- Workspace root: all file and command tools operate inside ${workspaceRoot}`);
   }
+
+  // Read the shared config file once; it can carry both fleet-wide vars and notes.
+  let shared: Record<string, unknown> = {};
+  try {
+    shared = JSON.parse(readFileSync(sharedConfigPath(), "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    // No shared config file - skip.
+  }
+  const sharedVars = collectStrings(shared.environmentVars);
+  const agentVars = collectStrings(config.environmentVars);
   // Surface operator-managed environment variables so agents know the real paths.
-  for (const name of ["COMSPEC", "FLUTTER_ROOT", "SUDOKU_REPO"]) {
+  const names = [...sharedVars, ...agentVars];
+  if (!sharedVars.length && !agentVars.length) names.push("COMSPEC");
+  for (const name of names) {
     const v = process.env[name]?.trim();
     if (v) lines.push(`- ${name}: ${v}`);
   }
 
   // Layer configured notes underneath: shared file first, then agent-specific.
-  let sharedNotes: string[] = [];
-  try {
-    sharedNotes = collectNotes(JSON.parse(readFileSync(sharedConfigPath(), "utf8").replace(/^\uFEFF/, "")).environmentNotes);
-  } catch {
-    // No shared config file - skip.
-  }
-  for (const note of [...sharedNotes, ...collectNotes(config.environmentNotes)]) {
+  const sharedNotes = collectStrings(shared.environmentNotes);
+  for (const note of [...sharedNotes, ...collectStrings(config.environmentNotes)]) {
     lines.push(`- ${note.trim()}`);
   }
 
