@@ -730,6 +730,61 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `add_comment, issue_interaction, register_work_product default to it automatically.\n` +
       `- When filing a board approval, do NOT restate the issue inside payload; the tool ` +
       `links the pinned issue for you. If you must reference it, use its uuid (${currentIssueId}).\n`;
+
+    // Interaction outcomes: board decisions (accept/reject + reason) are stored
+    // on the interaction result, never posted as comments, so without this the
+    // agent wakes up blind to WHY its sign-off was rejected. Surface recent
+    // resolutions verbatim, oldest-first within the window.
+    try {
+      const rawRows = await api.listIssueInteractions(currentIssueId);
+      const rows = (
+        Array.isArray(rawRows) ? rawRows : ((rawRows as { interactions?: unknown[] } | null)?.interactions ?? [])
+      ) as Array<Record<string, unknown>>;
+      if (rows.length > 0) {
+        const fmtWhen = (iso: unknown) => {
+          const d = typeof iso === "string" ? new Date(iso) : null;
+          return d && !isNaN(d.getTime()) ? d.toISOString().slice(0, 16) + "Z" : "?";
+        };
+        const describe = (r: Record<string, unknown>): string | null => {
+          const kind = typeof r.kind === "string" ? r.kind : "interaction";
+          const status = typeof r.status === "string" ? r.status : "?";
+          const when = fmtWhen(r.resolvedAt);
+          const by =
+            (typeof r.resolvedByUserId === "string" && r.resolvedByUserId) ||
+            (typeof r.resolvedByAgentId === "string" && r.resolvedByAgentId.slice(0, 8)) ||
+            "?";
+          if (status === "pending") {
+            return `[${when}] ${kind} PENDING (awaiting resolution) id=${String(r.id).slice(0, 8)}`;
+          }
+          const result = (r.result ?? {}) as Record<string, unknown>;
+          const outcome = typeof result.outcome === "string" ? result.outcome : status;
+          let line = `[${when}] ${kind} ${outcome.toUpperCase()} by ${by}`;
+          if (typeof result.reason === "string" && result.reason.trim()) {
+            const reason = result.reason.trim().length > 1500 ? result.reason.trim().slice(0, 1500) + "..." : result.reason.trim();
+            line += `\n    REASON (authoritative board feedback): ${reason}`;
+          }
+          return line;
+        };
+        const sorted = [...rows].sort((a, b) =>
+          String(a.resolvedAt ?? a.createdAt ?? "").localeCompare(String(b.resolvedAt ?? b.createdAt ?? ""))
+        );
+        const relevant = sorted.filter((r) => r.status !== "pending").slice(-8);
+        const pending = sorted.filter((r) => r.status === "pending");
+        const lines = [
+          ...relevant.map(describe).filter((x): x is string => !!x),
+          ...pending.map(describe).filter((x): x is string => !!x),
+        ];
+        if (lines.length > 0) {
+          runContextBlock +=
+            `\n\n## Recent interaction outcomes (board decisions)\n` +
+            lines.map((l) => "- " + l).join("\n") +
+            `\n- A REJECTED card's reason above is the board's authoritative change request. ` +
+            `Address it before re-filing any confirmation; never re-file an identical ask.\n`;
+        }
+      }
+    } catch {
+      /* interactions listing optional */
+    }
   }
   if (systemContent.includes("Paperclip operating protocol") || systemContent.length > 0) {
     systemContent += runContextBlock;

@@ -791,13 +791,28 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
             },
             continuation_policy: {
               type: "string",
-              enum: ["wake_assignee", "none"],
+              enum: ["wake_assignee", "wake_assignee_on_accept", "none"],
               description:
-                "wake_assignee re-wakes you automatically when the interaction is resolved; none leaves the issue parked. Default depends on kind.",
+                "wake_assignee re-wakes you when the interaction is resolved; wake_assignee_on_accept wakes you only on accept; none leaves the issue parked. Server default depends on kind (request_confirmation defaults to none).",
+            },
+            resolver_policy: {
+              type: "string",
+              enum: ["anyone", "not_creator", "human_only"],
+              description:
+                "Who may resolve the interaction. Default is server policy; governed actions force human_only.",
+            },
+            addressee_agent_id: {
+              type: "string",
+              description: "Route the interaction to a specific agent (they get the card; board feed drops it).",
             },
             submit_label: {
               type: "string",
               description: "For ask_user_questions: label on the submit button (max 120 chars).",
+            },
+            details_markdown: {
+              type: "string",
+              description:
+                "For request_confirmation / request_checkbox_confirmation / request_item_verdicts: optional markdown context block (max 20000 chars).",
             },
             questions: {
               type: "array",
@@ -841,6 +856,61 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
                 required: ["id", "prompt", "options"],
               },
             },
+            options: {
+              type: "array",
+              minItems: 1,
+              maxItems: 200,
+              description:
+                "REQUIRED for request_checkbox_confirmation: choices the user multi-selects. " +
+                '[{"id","label","description?"}] - ids unique, 1-200 options.',
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Unique within this interaction (max 120 chars)." },
+                  label: { type: "string", description: "Option text (1-120 chars)." },
+                  description: { type: "string", description: "Optional explanation (max 500 chars)." },
+                },
+                required: ["id", "label"],
+              },
+            },
+            min_selected: { type: "number", description: "For request_checkbox_confirmation: minimum selections (default 0)." },
+            max_selected: { type: "number", description: "For request_checkbox_confirmation: maximum selections." },
+            items: {
+              type: "array",
+              minItems: 1,
+              maxItems: 200,
+              description:
+                "REQUIRED for request_item_verdicts: items each needing approve/reject/defer. " +
+                '[{"id","label","description?"}] - ids unique, 1-200 items.',
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Unique within this interaction (max 120 chars)." },
+                  label: { type: "string", description: "Item text (1-120 chars)." },
+                  description: { type: "string", description: "Optional explanation (max 500 chars)." },
+                },
+                required: ["id", "label"],
+              },
+            },
+            tasks: {
+              type: "array",
+              minItems: 1,
+              maxItems: 50,
+              description:
+                'REQUIRED for suggest_tasks: proposed issues [{"client_key","title","description?","priority?",' +
+                '"parent_client_key?"}] - client keys unique, titles 1-240 chars.',
+              items: {
+                type: "object",
+                properties: {
+                  client_key: { type: "string", description: "Stable key unique within this suggestion set (max 120)." },
+                  title: { type: "string", description: "Issue title (1-240 chars)." },
+                  description: { type: "string", description: "Issue description (max 20000 chars)." },
+                  priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+                  parent_client_key: { type: "string", description: "client_key of another task in this set to nest under." },
+                },
+                required: ["client_key", "title"],
+              },
+            },
           },
           required: ["kind"],
         },
@@ -854,9 +924,38 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
         return fail(`Invalid kind "${kind}". Valid: ${INTERACTION_KINDS.join(", ")}`);
       }
       const prompt = asString(args.prompt);
-      if (kind === "request_confirmation" && !prompt) {
+      const details = typeof args.details_markdown === "string" ? args.details_markdown : undefined;
+      if (details !== undefined && details.length > 20000) {
+        return fail("details_markdown max 20000 chars.");
+      }
+      if ((kind === "request_confirmation" || kind === "request_checkbox_confirmation" || kind === "request_item_verdicts") && !prompt) {
         return fail(`prompt is required for kind="${kind}".`);
       }
+      // Shared option/item validator: unique trimmed ids (<=120), labels (1-120),
+      // optional descriptions (<=500).
+      const validateLabeledList = (
+        list: unknown,
+        noun: string,
+      ): Array<{ id: string; label: string; description?: string }> | string => {
+        const arr = Array.isArray(list) ? (list as Array<Record<string, unknown>>) : [];
+        if (arr.length < 1) return `${noun} array is required (at least one entry).`;
+        const seen = new Set<string>();
+        const out: Array<{ id: string; label: string; description?: string }> = [];
+        for (const o of arr) {
+          const oid = typeof o?.id === "string" ? o.id.trim() : "";
+          if (!oid || oid.length > 120) return `Each ${noun} entry needs an id (1-120 chars).`;
+          if (seen.has(oid)) return `Duplicate ${noun} id "${oid}".`;
+          seen.add(oid);
+          const label = typeof o?.label === "string" ? o.label.trim() : "";
+          if (!label || label.length > 120) return `${noun} "${oid}": label required (1-120 chars).`;
+          const d = o.description;
+          if (d !== undefined && !(typeof d === "string" && d.length <= 500)) {
+            return `${noun} "${oid}": description max 500 chars.`;
+          }
+          out.push(d === undefined ? { id: oid, label } : { id: oid, label, description: d });
+        }
+        return out;
+      };
       if (kind === "ask_user_questions") {
         if (prompt) {
           return fail('ask_user_questions does not take prompt - put your questions in the questions array.');
@@ -905,6 +1004,48 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
           }
           if (freeText > 1) return fail(`Question "${qid}": at most one option may set free_text=true.`);
         }
+      } else if (kind === "request_checkbox_confirmation") {
+        const r = validateLabeledList(args.options, "options");
+        if (typeof r === "string") return fail(`request_checkbox_confirmation: ${r}`);
+        if (r.length > 200) return fail("At most 200 options.");
+        const minSel = args.min_selected === undefined ? 0 : Number(args.min_selected);
+        if (!Number.isInteger(minSel) || minSel < 0) return fail("min_selected must be an integer >= 0.");
+        if (args.max_selected !== undefined) {
+          const maxSel = Number(args.max_selected);
+          if (!Number.isInteger(maxSel) || maxSel < 0) return fail("max_selected must be an integer >= 0.");
+          if (maxSel > 0 && maxSel < minSel) return fail("max_selected must be >= min_selected.");
+        }
+      } else if (kind === "request_item_verdicts") {
+        const r = validateLabeledList(args.items, "items");
+        if (typeof r === "string") return fail(`request_item_verdicts: ${r}`);
+        if (r.length > 200) return fail("At most 200 items.");
+      } else if (kind === "suggest_tasks") {
+        const arr = Array.isArray(args.tasks) ? (args.tasks as Array<Record<string, unknown>>) : [];
+        if (arr.length < 1) {
+          return fail('suggest_tasks requires tasks array: [{"client_key","title","description?"}]');
+        }
+        if (arr.length > 50) return fail("At most 50 tasks.");
+        const seenKeys = new Set<string>();
+        for (const t of arr) {
+          const ck = typeof t?.client_key === "string" ? t.client_key.trim() : "";
+          if (!ck || ck.length > 120) return fail("Each task needs client_key (1-120 chars).");
+          if (seenKeys.has(ck)) return fail(`Duplicate client_key "${ck}".`);
+          seenKeys.add(ck);
+          const title = typeof t?.title === "string" ? t.title.trim() : "";
+          if (!title || title.length > 240) return fail(`Task "${ck}": title required (1-240 chars).`);
+          const desc = t.description;
+          if (desc !== undefined && !(typeof desc === "string" && desc.length <= 20000)) {
+            return fail(`Task "${ck}": description max 20000 chars.`);
+          }
+          const prio = t.priority;
+          if (prio !== undefined && !["low", "medium", "high", "urgent"].includes(String(prio))) {
+            return fail(`Task "${ck}": priority must be low|medium|high|urgent.`);
+          }
+          const pck = t.parent_client_key;
+          if (pck !== undefined && !(typeof pck === "string" && pck.trim().length > 0 && pck.trim().length <= 120)) {
+            return fail(`Task "${ck}": parent_client_key must be a client_key in this set.`);
+          }
+        }
       }
       // Dedupe guard: don't stack duplicate pendings on the same issue.
       try {
@@ -924,12 +1065,14 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
       } catch {
         // Listing failed - proceed with creation; the server's idempotencyKey still protects against duplicates.
       }
+      const basePayload: Record<string, unknown> = {
+        version: 1 as const,
+        ...(prompt ? { prompt } : {}),
+        ...(details ? { detailsMarkdown: details } : {}),
+      };
       const body: Record<string, unknown> = {
         kind,
-        payload: {
-          version: 1 as const,
-          ...(prompt ? { prompt } : {}),
-        },
+        payload: basePayload,
       };
       if (kind === "ask_user_questions") {
         body.payload = {
@@ -950,6 +1093,28 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
             })),
           })),
         };
+      } else if (kind === "request_checkbox_confirmation") {
+        const opts = validateLabeledList(args.options, "options") as Array<{ id: string; label: string; description?: string }>;
+        body.payload = {
+          ...basePayload,
+          options: opts,
+          ...(typeof args.min_selected === "number" ? { minSelected: args.min_selected } : {}),
+          ...(args.max_selected !== undefined ? { maxSelected: Number(args.max_selected) } : {}),
+        };
+      } else if (kind === "request_item_verdicts") {
+        const items = validateLabeledList(args.items, "items") as Array<{ id: string; label: string; description?: string }>;
+        body.payload = { ...basePayload, items };
+      } else if (kind === "suggest_tasks") {
+        body.payload = {
+          version: 1,
+          tasks: (args.tasks as Array<Record<string, unknown>>).map((t) => ({
+            clientKey: (t.client_key as string).trim(),
+            title: (t.title as string).trim(),
+            ...(t.description !== undefined && typeof t.description === "string" ? { description: t.description } : {}),
+            ...(t.priority !== undefined ? { priority: t.priority } : {}),
+            ...(typeof t.parent_client_key === "string" ? { parentClientKey: t.parent_client_key.trim() } : {}),
+          })),
+        };
       }
       // title/summary/idempotencyKey are top-level fields on the create schema.
       if (args.title) body.title = asString(args.title);
@@ -957,6 +1122,12 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
       if (args.idempotencyKey) body.idempotencyKey = asString(args.idempotencyKey);
       if (args.continuation_policy && typeof args.continuation_policy === "string") {
         body.continuationPolicy = args.continuation_policy;
+      }
+      if (typeof args.resolver_policy === "string" && ["anyone", "not_creator", "human_only"].includes(args.resolver_policy)) {
+        body.resolverPolicy = args.resolver_policy;
+      }
+      if (typeof args.addressee_agent_id === "string" && args.addressee_agent_id.trim().length > 0) {
+        body.addresseeAgentId = args.addressee_agent_id.trim();
       }
       return safeCall("issue_interaction", () => ctx.api.createIssueInteraction(id, body));
     },
