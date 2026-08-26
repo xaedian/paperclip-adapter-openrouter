@@ -202,7 +202,7 @@ export async function testEnvironment(
     checks.push({
       code: "openrouter_connected",
       level: "info",
-      message: `Connected — ${allModels.length} models available (${freeModels.length} free)`,
+      message: `Connected - ${allModels.length} models available (${freeModels.length} free)`,
     });
 
     // ── 3. Validate selected model ──────────────────────────────
@@ -212,7 +212,7 @@ export async function testEnvironment(
       checks.push({
         code: "openrouter_model_auto",
         level: "info",
-        message: "Using auto-routing — OpenRouter selects the best model per request",
+        message: "Using auto-routing - OpenRouter selects the best model per request",
       });
     } else {
       const model = allModels.find((m) => m.id === selectedModel);
@@ -222,13 +222,13 @@ export async function testEnvironment(
         checks.push({
           code: "openrouter_model_found",
           level: "info",
-          message: `Model "${selectedModel}" — $${promptCost.toFixed(2)}/$${completionCost.toFixed(2)} per 1M tokens, ${model.context_length?.toLocaleString()} ctx`,
+          message: `Model "${selectedModel}" - $${promptCost.toFixed(2)}/$${completionCost.toFixed(2)} per 1M tokens, ${model.context_length?.toLocaleString()} ctx`,
         });
       } else {
         checks.push({
           code: "openrouter_model_not_found",
           level: "warn",
-          message: `Model "${selectedModel}" not found — may be deprecated or misspelled`,
+          message: `Model "${selectedModel}" not found - may be deprecated or misspelled`,
         });
       }
     }

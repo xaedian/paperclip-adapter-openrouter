@@ -725,7 +725,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     runContextBlock =
       `\n\n## Run context\n` +
-      `- Pinned issue: ${identifier ?? "(id only)"} — ${currentIssueId}\n` +
+      `- Pinned issue: ${identifier ?? "(id only)"} - ${currentIssueId}\n` +
       `- ALL work this run targets the pinned issue: request_approval, update_issue_status, ` +
       `add_comment, issue_interaction, register_work_product default to it automatically.\n` +
       `- When filing a board approval, do NOT restate the issue inside payload; the tool ` +

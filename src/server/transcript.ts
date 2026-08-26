@@ -128,7 +128,7 @@ export async function emitStderr(onLog: OnLog, text: string): Promise<void> {
 }
 
 /**
- * Raw stderr write — bypasses the JSON envelope. Use for adapter-level
+ * Raw stderr write - bypasses the JSON envelope. Use for adapter-level
  * diagnostics that should appear in the run log but not in the transcript.
  */
 export async function writeRawStderr(onLog: OnLog, text: string): Promise<void> {

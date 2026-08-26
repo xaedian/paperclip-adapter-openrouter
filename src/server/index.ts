@@ -6,8 +6,8 @@
  * it imports this package's main entry and calls createServerAdapter(),
  * validating that the returned module has a "type".
  *
- * Everything is declared on the module itself — supportsLocalAgentJwt,
- * config schema, model discovery, skills, session codec — so no Paperclip
+ * Everything is declared on the module itself - supportsLocalAgentJwt,
+ * config schema, model discovery, skills, session codec - so no Paperclip
  * source patches are needed on any version that ships the external
  * adapter plugin store (>= 2026.40x).
  */
@@ -53,7 +53,7 @@ async function loadModels(force: boolean): Promise<AdapterModel[]> {
     cachedModelsAt = now;
     return discovered;
   }
-  // Discovery failed — fall back to the static list rather than nothing.
+  // Discovery failed - fall back to the static list rather than nothing.
   return cachedModels ?? fallbackModels;
 }
 
@@ -66,7 +66,7 @@ async function refreshModels(): Promise<AdapterModel[]> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Declarative config schema — lets the stock UI render our agent
+// Declarative config schema - lets the stock UI render our agent
 // form without shipping any React components.
 // ─────────────────────────────────────────────────────────────────
 
@@ -182,7 +182,7 @@ function getConfigSchema(): AdapterConfigSchema {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Session codec — persists lastGenerationId across heartbeats so the
+// Session codec - persists lastGenerationId across heartbeats so the
 // run viewer shows a stable display id and future versions can chain
 // conversations.
 // ─────────────────────────────────────────────────────────────────
@@ -206,7 +206,7 @@ export const sessionCodec: AdapterSessionCodec = {
 };
 
 // ─────────────────────────────────────────────────────────────────
-// detectModel — OpenRouter has no local CLI config to read; the env
+// detectModel - OpenRouter has no local CLI config to read; the env
 // var is the only meaningful source.
 // ─────────────────────────────────────────────────────────────────
 
@@ -223,7 +223,7 @@ export async function detectModel(): Promise<{
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Skills — ephemeral mode. We scan an operator-managed root
+// Skills - ephemeral mode. We scan an operator-managed root
 // (~/.openrouter-adapter/skills by default) and report each subdir
 // containing a SKILL.md as an external skill. Paperclip-managed
 // runtime skills (config.paperclipRuntimeSkills) are additionally

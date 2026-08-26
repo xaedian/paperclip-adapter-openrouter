@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────
-// @paperclipai/adapter-openrouter — CLI Format Event
+// @paperclipai/adapter-openrouter - CLI Format Event
 // Pretty-prints stdout for `paperclipai run --watch` in terminal
 // ─────────────────────────────────────────────────────────────────
 
-// NOTE: picocolors is a peer dep — import dynamically to avoid
+// NOTE: picocolors is a peer dep - import dynamically to avoid
 // breaking server/ui bundles that don't need it.
 
 interface FormatOptions {
@@ -21,7 +21,7 @@ export function formatEvent(
   const trimmed = line.trim();
   if (!trimmed) return null;
 
-  // SSE data lines — extract content
+  // SSE data lines - extract content
   if (trimmed.startsWith("data: ")) {
     const data = trimmed.slice(6);
     if (data === "[DONE]") return null;

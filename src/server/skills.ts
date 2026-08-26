@@ -11,7 +11,7 @@
  *
  * v1 design: scan the root, load every subdirectory that contains a SKILL.md,
  * inject all of them. We do NOT yet integrate with Paperclip's "desired skills"
- * registry — that requires API access and is deferred to v3. For now, the
+ * registry - that requires API access and is deferred to v3. For now, the
  * operator controls which skills an agent gets by what they put in the
  * skills directory.
  *
@@ -58,7 +58,7 @@ export async function loadSkills(params: LoadSkillsParams): Promise<LoadedSkill[
   const root = resolveSkillsRoot(agentConfig);
 
   if (!(await pathExists(root))) {
-    // Not an error — most agents won't have skills configured.
+    // Not an error - most agents won't have skills configured.
     return [];
   }
 

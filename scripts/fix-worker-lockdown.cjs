@@ -52,7 +52,7 @@ for (const bundle of bundles) {
 
   console.log("  After patching, unwrapped:", after);
 
-  // Write back as UTF-8 (no BOM) — Node preserves all multi-byte chars
+  // Write back as UTF-8 (no BOM) - Node preserves all multi-byte chars
   fs.writeFileSync(bundle, c, "utf8");
   console.log("  Patched OK (backup: .pre-adapter-fix)");
 }

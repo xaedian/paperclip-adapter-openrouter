@@ -1,6 +1,6 @@
 "use strict";
 /**
- * OpenRouter adapter — UI transcript parser for Paperclip.
+ * OpenRouter adapter - UI transcript parser for Paperclip.
  *
  * Served to the browser via the adapter's "./ui-parser" export
  * (paperclip.adapterUiParser contract 1.0.0). Must stay dependency-free,

@@ -214,7 +214,7 @@ export class PaperclipApi {
   // ----- Approvals -----
   /**
    * Create a company-level approval. Pass `issueIds` to link the approval to
-   * specific issues — a pending issue-linked approval counts as a real review
+   * specific issues - a pending issue-linked approval counts as a real review
    * path (invalid_issue_disposition gate) and gates the task until resolved.
    * Schema: createApprovalSchema = { type, requestedByAgentId?, payload, issueIds?: uuid[] }.
    */

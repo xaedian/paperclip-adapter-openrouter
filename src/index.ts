@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────
-// OpenRouter adapter for Paperclip — root metadata.
+// OpenRouter adapter for Paperclip - root metadata.
 // Shared across server · cli · ui-parser. Metadata below is dependency-
 // free; createServerAdapter() is re-exported from ./server because
 // Paperclip's plugin loader imports the package MAIN entry and calls it.
@@ -22,7 +22,7 @@ export const models = [
   { id: "mistralai/mistral-small-3.2-24b-instruct:free", label: "Mistral Small 3.2 (free)" },
   { id: "openai/gpt-oss-120b:free",               label: "GPT-OSS 120B (free)" },
 
-  // Paid — frontier
+  // Paid - frontier
   { id: "anthropic/claude-sonnet-4-6",            label: "Claude Sonnet 4.6" },
   { id: "anthropic/claude-opus-4-6",              label: "Claude Opus 4.6" },
   { id: "openai/gpt-4.1",                         label: "GPT-4.1" },
@@ -31,7 +31,7 @@ export const models = [
   { id: "google/gemini-2.5-flash",                label: "Gemini 2.5 Flash" },
   { id: "deepseek/deepseek-r1",                   label: "DeepSeek R1" },
 
-  // Paid — mid-tier
+  // Paid - mid-tier
   { id: "anthropic/claude-haiku-4-5",             label: "Claude Haiku 4.5" },
   { id: "openai/gpt-4.1-mini",                    label: "GPT-4.1 Mini" },
   { id: "openai/gpt-4o-mini",                     label: "GPT-4o Mini" },
@@ -87,17 +87,17 @@ with a full multi-turn tool-calling loop against Paperclip's REST API.
 - You need models not covered by native CLI adapters (Llama, Qwen, Mistral, DeepSeek, ...)
 
 ## Core fields
-- \`model\` (string) — any OpenRouter model id, e.g. "anthropic/claude-sonnet-4-6".
+- \`model\` (string) - any OpenRouter model id, e.g. "anthropic/claude-sonnet-4-6".
   "openrouter/auto" lets OpenRouter pick per request; ":free" suffix routes to the free tier.
-- \`apiKey\` (string) — per-agent override ONLY; leave blank for fleet default.
+- \`apiKey\` (string) - per-agent override ONLY; leave blank for fleet default.
   Fleet key lives in the Paperclip Secrets Manager (OPENROUTER_API_KEY) and is
   resolved automatically at run time - no env vars or files involved.
 
 ## Tool loop
-- \`maxTurns\` (number, default 30) — max model/tool round-trips per run
-- \`autoApprove\` (boolean, default false) — skip the human approval gate on hire_agent
-- \`requestTimeoutSec\` (number, default 600) — per-request timeout
-- \`stream\` (boolean, default true) — live token streaming into the run transcript
+- \`maxTurns\` (number, default 30) - max model/tool round-trips per run
+- \`autoApprove\` (boolean, default false) - skip the human approval gate on hire_agent
+- \`requestTimeoutSec\` (number, default 600) - per-request timeout
+- \`stream\` (boolean, default true) - live token streaming into the run transcript
 
 ## Local execution (workspace tools)
 When \`enableLocalExec\` is true (default), the agent also gets workspace-confined
@@ -108,22 +108,22 @@ byte-capped and commands are killed at their timeout.
 ## Sampling
 - \`temperature\` (0-2, default 0.7), \`topP\` (default 1), \`maxTokens\` (default 16384,
   automatically clamped to the selected model's advertised maximum)
-- \`reasoning\` (boolean) — extended thinking for reasoning-capable models
-- \`transforms\` (string[]) — OpenRouter transforms, e.g. ["middle-out"]
-- \`route\` ("fallback" | "no-fallback") — provider failover behaviour
+- \`reasoning\` (boolean) - extended thinking for reasoning-capable models
+- \`transforms\` (string[]) - OpenRouter transforms, e.g. ["middle-out"]
+- \`route\` ("fallback" | "no-fallback") - provider failover behaviour
 
 ## Instructions & skills
-- \`systemPrompt\` (string) — base system prompt
-- \`instructionsFilePath\` (string) — path to a markdown instructions file; overrides systemPrompt
-- \`skillsDir\` (string) — directory of SKILL.md folders injected into the system prompt
+- \`systemPrompt\` (string) - base system prompt
+- \`instructionsFilePath\` (string) - path to a markdown instructions file; overrides systemPrompt
+- \`skillsDir\` (string) - directory of SKILL.md folders injected into the system prompt
 
 ## Don't use when
 - You only need one provider and already have its native adapter/key
 - You need local/offline inference
 
 ## Environment (server-side)
-- OPENROUTER_API_KEY — fallback when apiKey config is empty
-- PAPERCLIP_AGENT_JWT_SECRET — host-side; lets Paperclip mint the agent JWT this adapter
+- OPENROUTER_API_KEY - fallback when apiKey config is empty
+- PAPERCLIP_AGENT_JWT_SECRET - host-side; lets Paperclip mint the agent JWT this adapter
   uses for its tool calls (supportsLocalAgentJwt is enabled by default)
 `;
 // ── Types ───────────────────────────────────────────────────────
