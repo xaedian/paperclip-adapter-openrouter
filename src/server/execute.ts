@@ -163,7 +163,15 @@ const OPERATING_PROTOCOL =
   "all work against it. If no issue is pinned, list your assigned issues, pick the one this wake concerns "
   "(in_progress first, then todo), and state your choice explicitly before working.\n" +
   "- Before requesting sign-off you MUST already be working inside that task's context, so request_approval "
-  "auto-links it. Never file an approval \"to mention an issue\" - approvals are filed FROM a task.";
+  "auto-links it. Never file an approval \"to mention an issue\" - approvals are filed FROM a task.\n" +
+  "- Cross-issue budget: at most 20 writes to OTHER issues per run (hard server cap). Stay inside your pinned "
+  "issue; if you hit the cap, stop and delegate instead of churning.\n" +
+  "- Rejections carry feedback: check 'Recent interaction outcomes' in your run context for rejection reasons. "
+  "A rejected card's reason is the board's authoritative change request - address it, never re-file an identical ask.\n" +
+  "- Waking peers: to hand work to a teammate immediately use wake_agent (idempotency_key recommended) rather than "
+  "assign-and-wait.\n" +
+  "- Self-discovery: the full control-plane API is machine-readable at GET {PAPERCLIP_API_URL}/openapi.json when a "
+  "tool does not exist for what you need; still prefer the provided tools for anything they cover.";
 
 
 /** Merge agent-level adapterConfig over any host-level defaults. */
@@ -785,6 +793,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     } catch {
       /* interactions listing optional */
     }
+
+    // Heartbeat context: the host's canonical compact wake payload (ancestors,
+    // project/goal summaries, wake comment). Injecting it means the model never
+    // has to reconstruct why it was woken from raw comments.
+    try {
+      const hc = (await api.getHeartbeatContext(currentIssueId)) as Record<string, unknown>;
+      const lines: string[] = [];
+      const pushSummary = (label: string, v: unknown) => {
+        if (v && typeof v === "object") {
+          const o = v as Record<string, unknown>;
+          const t = typeof o.title === "string" ? o.title : typeof o.name === "string" ? o.name : "";
+          const id = typeof o.id === "string" ? o.id.slice(0, 8) : "";
+          if (t || id) lines.push(`- ${label}: ${t}${id ? ` (${id})` : ""}`);
+        }
+      };
+      pushSummary("Project", hc.project);
+      pushSummary("Goal", hc.goal);
+      const ancestors = Array.isArray(hc.ancestors) ? (hc.ancestors as Array<Record<string, unknown>>) : [];
+      for (const a of ancestors.slice(0, 5)) {
+        const ident = typeof a.identifier === "string" ? a.identifier : String(a.id ?? "").slice(0, 8);
+        if (typeof a.title === "string") lines.push(`- Ancestor: ${ident} ${a.title}`);
+      }
+      const wake = hc.wakeComment as Record<string, unknown> | null | undefined;
+      if (wake && typeof wake.body === "string") {
+        lines.push(`- Wake comment: ${wake.body.slice(0, 800)}`);
+      }
+      if (lines.length > 0) {
+        runContextBlock += `\n\n## Heartbeat context\n${lines.join("\n")}\n`;
+      }
+    } catch {
+      /* heartbeat-context is optional */
+    }
   }
   if (systemContent.includes("Paperclip operating protocol") || systemContent.length > 0) {
     systemContent += runContextBlock;
@@ -1187,7 +1227,11 @@ outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requ
         }
       : {}),
     usage: totalUsage,
+    // OpenRouter's /generation total_cost is the provider-billed (cache-adjusted)
+    // amount; reporting it as cacheAdjustedCostUsd makes the ledger semantics
+    // explicit per docs.paperclip.ing/reference/api/costs.
     costUsd,
+    ...(costUsd !== null ? { cacheAdjustedCostUsd: costUsd } : {}),
     sessionId: lastGenerationId ?? null,
     sessionDisplayId: lastGenerationId ?? null,
     sessionParams: {

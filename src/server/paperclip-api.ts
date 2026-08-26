@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Thin HTTP client for the Paperclip API.
  *
  * Used by tool handlers to call Paperclip as the agent (not the server).
@@ -259,7 +259,7 @@ export class PaperclipApi {
     return this.request("GET", `/api/issues/${encodeURIComponent(issueId)}/interactions`);
   }
 
-  // ----- Issue ↔ approval linking -----
+  // ----- Issue â†” approval linking -----
   /**
    * List approvals linked to an issue (agent-readable). Used by the
    * update_status completion guard: a pending linked approval must block
@@ -346,5 +346,87 @@ export class PaperclipApi {
    */
   resolveRecoveryAction(issueId: string, body: Record<string, unknown>): Promise<unknown> {
     return this.request("POST", `/api/issues/${encodeURIComponent(issueId)}/recovery-actions/resolve`, body);
+  }
+
+  // ----- Agent inbox (compact assigned/blocked view) -----
+  /** GET /api/agents/me/inbox-lite - compact list of the calling agent's work. */
+  getInboxLite(): Promise<unknown> {
+    return this.request("GET", `/api/agents/me/inbox-lite`);
+  }
+
+  // ----- Item-verdict resolution (request_item_verdicts cards) -----
+  /**
+   * Submit verdicts on a request_item_verdicts interaction.
+   * Schema submitIssueThreadInteractionVerdictsSchema:
+   * {verdicts: [{id, verdict: approve|reject|defer, reason?<=4000}]} (1..200).
+   */
+  submitInteractionVerdicts(issueId: string, interactionId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request(
+      "POST",
+      `/api/issues/${encodeURIComponent(issueId)}/interactions/${encodeURIComponent(interactionId)}/verdicts`,
+      body,
+    );
+  }
+
+  // ----- Approvals: resubmit after request-revision -----
+  /**
+   * Resubmit an approval that is in revision_requested status.
+   * Body: {payload?} - replaces the approval payload.
+   */
+  resubmitApproval(approvalId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/approvals/${encodeURIComponent(approvalId)}/resubmit`, body);
+  }
+
+  // ----- Decisions (agent-proposed, board-decided) -----
+  /**
+   * Propose a structured decision. Route requires run context
+   * (X-Paperclip-Run-Id, sent automatically). See createDecisionSchema.
+   */
+  proposeDecision(companyId: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.request("POST", `/api/companies/${encodeURIComponent(companyId)}/decisions`, body);
+  }
+
+  // ----- Attachments -----
+  /**
+   * Upload a file as an issue attachment. Multipart field name must be `file`.
+   * Size cap is the company's attachmentMaxBytes.
+   */
+  async uploadAttachment(companyId: string, issueId: string, filePath: string): Promise<unknown> {
+    const { readFile } = await import("node:fs/promises");
+    const { basename } = await import("node:path");
+    const data = await readFile(filePath);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(data)]), basename(filePath));
+    const headers: Record<string, string> = {};
+    if (this.runId) headers["X-Paperclip-Run-Id"] = this.runId;
+    if (!this.authToken) throw new Error("uploadAttachment requires an API key");
+    headers["Authorization"] = `Bearer ${this.authToken}`;
+    const res = await fetch(`${this.baseUrl}/api/companies/${encodeURIComponent(companyId)}/issues/${encodeURIComponent(issueId)}/attachments`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Paperclip API ${res.status}: ${text.slice(0, 500)}`);
+    }
+    return (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  }
+
+  /** Download an attachment's content to destPath. Returns bytes written. */
+  async downloadAttachment(attachmentId: string, destPath: string): Promise<number> {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    const headers: Record<string, string> = {};
+    headers["Authorization"] = `Bearer ${this.authToken}`;
+    const res = await fetch(`${this.baseUrl}/api/attachments/${encodeURIComponent(attachmentId)}/content`, { headers });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Paperclip API ${res.status}: ${text.slice(0, 500)}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    await mkdir(dirname(destPath), { recursive: true });
+    await writeFile(destPath, buf);
+    return buf.length;
   }
 }

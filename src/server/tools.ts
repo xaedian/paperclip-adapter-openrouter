@@ -308,8 +308,8 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
             return fail(
               `Cannot move to in_review yet: this issue has no review path (no pending linked approval or interaction).` +
                 (names
-                  ? ` Your unlinked pending approval(s): ${names} â€” re-file with request_approval from this task's context, or use link_approval to attach one here first.`
-                  : ` Create a request_confirmation via issue_interaction, or file request_approval while working this task.`),
+                  ? ` Your unlinked pending approval(s): ${names} - re-file with request_approval from this task's context, or use link_approval to attach one here first.` :
+                  ` Create a request_confirmation via issue_interaction, or file request_approval while working this task.`),
               { missingReviewPath: true },
             );
           }
@@ -630,6 +630,12 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
                 "Do NOT bury issue ids inside payload - they are hoisted as a fallback, but passing " +
                 "link_issue_id explicitly is the reliable path. Omit only to use the current issue.",
             },
+            resubmit_approval_id: {
+              type: "string",
+              description:
+                "Set when revising an approval that came back revision_requested: resubmits THAT approval " +
+                "(with the new payload) instead of creating a duplicate. Only valid from revision_requested.",
+            },
           },
           required: ["type", "summary"],
         },
@@ -644,7 +650,7 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
       //   1. explicit link_issue_id arg (top-level)
       //   2. current issue
       //   3. models frequently nest issueIds / sourceIssueId / issue_id INSIDE
-      //      payload â€” hoist them out so linkage actually happens instead of
+      //      payload - hoist them out so linkage actually happens instead of
       //      being silently dropped by the server schema.
       let issueIds: string[] = [];
       if (typeof args.link_issue_id === "string") {
@@ -703,6 +709,11 @@ function requestApprovalTool(ctx: BuildToolsContext): Tool {
       // Strip linkage hints from the persisted payload (server stores it verbatim;
       // keeping stale copies invites future confusion).
       const { issueIds: _drop1, issue_ids: _drop2, sourceIssueId: _drop3, issue_id: _drop4, ...payload } = rawPayload;
+      if (typeof args.resubmit_approval_id === "string" && args.resubmit_approval_id.trim().length > 0) {
+        return safeCall("request_approval(resubmit)", () =>
+          ctx.api.resubmitApproval(args.resubmit_approval_id as string, { payload: { ...payload, summary } }),
+        );
+      }
       const approval = await safeCall("request_approval", () =>
         ctx.api.createApproval(ctx.companyId, {
           type,
@@ -1139,6 +1150,7 @@ const INTERACTION_ACTION_KINDS = {
   accept: "accept",
   reject: "reject",
   withdraw: "withdraw",
+  verdicts: "verdicts",
 } as const;
 
 /**
@@ -1148,6 +1160,7 @@ const INTERACTION_ACTION_KINDS = {
  * - accept:  accept a checkbox_confirmation / suggested tasks (selectedClientKeys / selectedOptionIds)
  * - reject:  reject with a reason
  * - withdraw: withdraw YOUR OWN pending interaction (superseded by new info)
+ * - verdicts: submit approve/reject/defer per item on a request_item_verdicts card
  *
  * Note: cancelling is board-only; agents cannot cancel.
  */
@@ -1159,9 +1172,10 @@ function interactionActionTool(ctx: BuildToolsContext): Tool {
         name: "interaction_action",
         description:
           "Act on an existing issue-thread interaction. Actions: 'respond' (answer ask_user_questions questions), " +
-          "'accept' (confirm a checkbox confirmation or accept suggested tasks â€” use selected_option_ids for " +
+          "'accept' (confirm a checkbox confirmation or accept suggested tasks - use selected_option_ids for " +
           "checkbox confirmations, selected_client_keys for suggested tasks), 'reject' (decline, with reason), " +
-          "'withdraw' (retract YOUR OWN pending request because it was superseded or posted by mistake). " +
+          "'withdraw' (retract YOUR OWN pending request because it was superseded or posted by mistake), " +
+          "'verdicts' (submit approve/reject/defer per item on a request_item_verdicts card addressed to you). " +
           "You CANNOT act on board-authored confirmations that only the board may resolve.",
         parameters: {
           type: "object",
@@ -1197,6 +1211,23 @@ function interactionActionTool(ctx: BuildToolsContext): Tool {
               type: "array",
               items: { type: "string" },
               description: "For action='accept' on checkbox confirmations: ids of selected options.",
+            },
+            verdicts: {
+              type: "array",
+              minItems: 1,
+              maxItems: 200,
+              description:
+                'For action=\'verdicts\' on request_item_verdicts cards: [{"id": <item id>, "verdict": "approve"|"reject"|"defer", "reason"?}] ' +
+                "(reason required on reject by default; max 4000 chars). Partial submissions keep the card pending.",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Item id from the card's payload." },
+                  verdict: { type: "string", enum: ["approve", "reject", "defer"] },
+                  reason: { type: "string", description: "Required for reject unless the card says otherwise." },
+                },
+                required: ["id", "verdict"],
+              },
             },
             reason: { type: "string", description: "For actions 'reject'/'withdraw': why (max 4000 chars)." },
           },
@@ -1239,6 +1270,27 @@ function interactionActionTool(ctx: BuildToolsContext): Tool {
           ...(keys.length > 0 ? { selectedClientKeys: keys } : {}),
           ...(opts.length > 0 ? { selectedOptionIds: opts } : {}),
         };
+      } else if (action === "verdicts") {
+        const raw = Array.isArray(args.verdicts) ? (args.verdicts as Array<Record<string, unknown>>) : [];
+        if (raw.length === 0) return fail("action='verdicts' requires a verdicts array [{id, verdict, reason?}].");
+        if (raw.length > 200) return fail("At most 200 verdicts per submission.");
+        const seen = new Set<string>();
+        const rows = raw.map((v) => {
+          const vid = typeof v?.id === "string" ? v.id.trim() : "";
+          const verdict = typeof v?.verdict === "string" ? v.verdict : "";
+          const reason = typeof v?.reason === "string" ? v.reason.trim() : undefined;
+          return { vid, verdict, reason };
+        });
+        for (const r of rows) {
+          if (!r.vid || r.vid.length > 120) return fail("Each verdict needs an item id (1-120 chars).");
+          if (seen.has(r.vid)) return fail(`Duplicate verdict item id "${r.vid}".`);
+          seen.add(r.vid);
+          if (!["approve", "reject", "defer"].includes(r.verdict)) {
+            return fail(`Verdict "${r.vid}" must be approve|reject|defer.`);
+          }
+          if (r.reason !== undefined && r.reason.length > 4000) return fail(`Verdict "${r.vid}": reason max 4000 chars.`);
+        }
+        body = { verdicts: rows.map((r) => ({ id: r.vid, verdict: r.verdict, ...(r.reason ? { reason: r.reason } : {}) })) };
       } else {
         // reject / withdraw share {reason?}
         const reason = asString(args.reason);
@@ -1251,6 +1303,7 @@ function interactionActionTool(ctx: BuildToolsContext): Tool {
         if (action === "respond") return ctx.api.respondIssueInteraction(id, interactionId, body);
         if (action === "accept") return ctx.api.acceptIssueInteraction(id, interactionId, body);
         if (action === "reject") return ctx.api.rejectIssueInteraction(id, interactionId, body);
+        if (action === "verdicts") return ctx.api.submitInteractionVerdicts(id, interactionId, body);
         return ctx.api.withdrawIssueInteraction(id, interactionId, body);
       });
     },
@@ -1454,6 +1507,328 @@ function recoveryActionTool(ctx: BuildToolsContext): Tool {
 
 // ----- public API -----
 
+/** Compact view of the calling agent's assigned/blocked/in-review work. */
+function myInboxTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "my_inbox",
+        description:
+          "List YOUR work at a glance: assigned issues, blocked items, pending interactions/approvals. " +
+          "Cheap heartbeat-start orientation call.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    execute: async () => safeCall("my_inbox", () => ctx.api.getInboxLite()),
+  };
+}
+
+/** Wake a teammate agent on demand (e.g. after unblocking their dependency). */
+function wakeAgentTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "wake_agent",
+        description:
+          "Request a wakeup for another agent (or yourself) - queues a run with an optional payload. " +
+          "Use to hand off work immediately instead of waiting for their next scheduled heartbeat. " +
+          "Returns 202 accepted; delivery is best-effort by the host scheduler.",
+        parameters: {
+          type: "object",
+          properties: {
+            agent_id: { type: "string", description: "Target agent id (uuid)." },
+            issue_id: { type: "string", description: "Optional issue id placed in payload.issueId for context." },
+            reason: { type: "string", description: "Human-readable reason for the wake (max ~500 chars)." },
+            idempotency_key: {
+              type: "string",
+              description:
+                "Stable key so retries do not double-wake (e.g. 'wake:{issueId}:{purpose}'). Strongly recommended.",
+            },
+            force_fresh_session: { type: "boolean", description: "Start the target run without prior session state." },
+          },
+          required: ["agent_id"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const agentId = asString(args.agent_id);
+      if (!agentId) return fail("agent_id is required.");
+      const body: Record<string, unknown> = { source: "on_demand", triggerDetail: "ping" };
+      if (args.reason !== undefined) body.reason = asString(args.reason);
+      const payload: Record<string, unknown> = {};
+      if (typeof args.issue_id === "string" && args.issue_id.trim()) payload.issueId = args.issue_id.trim();
+      if (Object.keys(payload).length > 0) body.payload = payload;
+      if (args.idempotency_key !== undefined) body.idempotencyKey = asString(args.idempotency_key);
+      if (args.force_fresh_session === true) body.forceFreshSession = true;
+      return safeCall("wake_agent", () => ctx.api.wakeAgent(agentId, body));
+    },
+  };
+}
+
+/**
+ * Propose a structured decision for the board. Effects execute automatically
+ * when the board picks the option; targets are snapshotted for staleness.
+ */
+function proposeDecisionTool(ctx: BuildToolsContext): Tool {
+  const EFFECT_TYPES = ["comment_on_issue", "create_issue", "update_issue_status", "assign_issue", "resolve_blocker", "cancel_issue_tree"];
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "propose_decision",
+        description:
+          "File a structured decision card for the board: one question, 1-8 options, each option declaring up to 10 " +
+          "concrete effects that auto-execute when chosen (comment/create/status/assign/unblock/cancel-tree). " +
+          "Prefer this over free-text ask_user_questions when each answer maps to concrete actions. " +
+          "Unresolved decisions expire after 7 days by default; you are woken on resolution.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Decision title (1-500 chars)." },
+            body: { type: "string", description: "Context / rationale markdown (max 100000)." },
+            options: {
+              type: "array",
+              minItems: 1,
+              maxItems: 8,
+              description:
+                'Options: [{"id","label","description?","style":"default"|"primary"|"destructive",' +
+                '"effects":[...]}]. Options containing cancel_issue_tree MUST use style="destructive".',
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Unique within this decision (max 120)." },
+                  label: { type: "string", description: "Button text (1-240)." },
+                  description: { type: "string", description: "Optional explanation (max 2000)." },
+                  style: { type: "string", enum: ["default", "primary", "destructive"] },
+                  effects: {
+                    type: "array",
+                    maxItems: 10,
+                    description:
+                      "Effects executed if this option wins. Each needs target_issue_id + staleness " +
+                      '("strict" fails if target changed since filing, "lenient" applies anyway).' +
+                      " cancel_issue_tree effects are always strict and MUST use style=destructive.",
+                    items: {
+                      type: "object",
+                      properties: {
+                        type: { type: "string", enum: EFFECT_TYPES },
+                        target_issue_id: { type: "string", description: "Issue the effect targets (uuid). Not needed for create_issue." },
+                        staleness: { type: "string", enum: ["strict", "lenient"], description: "Defaults to strict. cancel_issue_tree is always strict." },
+                        body_markdown: { type: "string", description: "comment_on_issue: required (1-20000). cancel_issue_tree: used as reasonComment." },
+                        status: { type: "string", description: "update_issue_status: required." },
+                        comment: { type: "string", description: "update_issue_status / assign_issue: optional comment." },
+                        assignee_agent_id: { type: "string", description: "assign_issue: exactly one assignee required (agent or user)." },
+                        assignee_user_id: { type: "string", description: "assign_issue: exactly one assignee required (agent or user)." },
+                        remove_blocked_by_issue_ids: { type: "array", items: { type: "string" }, description: "resolve_blocker: required (1-100 uuids)." },
+                        draft: { type: "object", description: "create_issue: required {title, description?, parentId?, assigneeAgentId?, projectId?, goalId?, blockedByIssueIds?}." },
+                      },
+                      required: ["type"],
+                    },
+                  },
+                },
+                required: ["id", "label", "effects"],
+              },
+            },
+            inputs: {
+              type: "array",
+              description:
+                "Optional follow-up text fields displayed below the options (max 4). " +
+                "Use when the board needs to type a value as part of their decision.",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Unique key within this decision (1-120 chars)." },
+                  label: { type: "string", description: "Prompt label shown above the input field (1-240 chars)." },
+                  placeholder: { type: "string", description: "Optional placeholder (max 500)." },
+                  required: { type: "boolean" },
+                  maxLength: { type: "number", description: "Max char count (1-20000)." },
+                },
+                required: ["id", "label"],
+              },
+            },
+            expires_at: { type: "string", description: "Optional ISO expiry (default +7d, max +30d)." },
+            idempotency_key: { type: "string", description: "Stable key so retries do not duplicate the decision." },
+          },
+          required: ["title", "options"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const title = asString(args.title);
+      if (!title || title.length > 500) return fail("title is required (1-500 chars).");
+      const rawOpts = Array.isArray(args.options) ? (args.options as Array<Record<string, unknown>>) : [];
+      if (rawOpts.length < 1 || rawOpts.length > 8) return fail("1-8 options required.");
+      const seenIds = new Set<string>();
+      const options = [];
+      for (const o of rawOpts) {
+        const oid = typeof o?.id === "string" ? o.id.trim() : "";
+        if (!oid || oid.length > 120) return fail("Each option needs an id (1-120 chars).");
+        if (seenIds.has(oid)) return fail(`Duplicate option id "${oid}".`);
+        seenIds.add(oid);
+        const label = typeof o?.label === "string" ? o.label.trim() : "";
+        if (!label || label.length > 240) return fail(`Option "${oid}": label required (1-240 chars).`);
+        const desc = o.description;
+        if (desc !== undefined && !(typeof desc === "string" && desc.length <= 2000)) {
+          return fail(`Option "${oid}": description max 2000 chars.`);
+        }
+        const style = typeof o.style === "string" && ["default", "primary", "destructive"].includes(o.style) ? o.style : undefined;
+        const rawFx = Array.isArray(o.effects) ? (o.effects as Array<Record<string, unknown>>) : [];
+        if (rawFx.length < 1 || rawFx.length > 10) return fail(`Option "${oid}" needs 1-10 effects.`);
+        const effects = [];
+        let hasCancelTree = false;
+        for (const fx of rawFx) {
+          const t = typeof fx?.type === "string" ? fx.type : "";
+          if (!EFFECT_TYPES.includes(t)) return fail(`Option "${oid}": effect type must be one of ${EFFECT_TYPES.join(", ")}.`);
+          const target = typeof fx.target_issue_id === "string" ? fx.target_issue_id.trim() : "";
+          const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (t !== "create_issue") {
+            if (!uuidRe.test(target)) return fail(`Option "${oid}" effect ${t}: target_issue_id must be a uuid.`);
+          }
+          const staleness = fx.staleness === "lenient" ? "lenient" : "strict";
+          const base: Record<string, unknown> = { type: t };
+          if (t !== "create_issue") Object.assign(base, { targetIssueId: target, staleness });
+          if (t === "comment_on_issue") {
+            const bm = typeof fx.body_markdown === "string" ? fx.body_markdown.trim() : "";
+            if (!bm || bm.length > 20000) return fail(`Option "${oid}" ${t}: body_markdown required (1-20000).`);
+            Object.assign(base, { bodyMarkdown: bm });
+          } else if (t === "update_issue_status") {
+            const st = typeof fx.status === "string" ? fx.status : "";
+            if (!st) return fail(`Option "${oid}" ${t}: status required.`);
+            Object.assign(base, { status: st, ...(typeof fx.comment === "string" && fx.comment ? { comment: fx.comment } : {}) });
+          } else if (t === "assign_issue") {
+            const agentVal = typeof fx.assignee_agent_id === "string" ? fx.assignee_agent_id.trim() : "";
+            const userVal = typeof fx.assignee_user_id === "string" ? fx.assignee_user_id.trim() : "";
+            if (!agentVal && !userVal) return fail(`Option "${oid}" ${t}: set exactly one assignee_agent_id or assignee_user_id.`);
+            if (agentVal && userVal) return fail(`Option "${oid}" ${t}: set exactly one assignee_agent_id or assignee_user_id (not both).`);
+            Object.assign(base, {
+              ...(agentVal ? { assigneeAgentId: agentVal } : { assigneeUserId: userVal }),
+              ...(typeof fx.comment === "string" && fx.comment ? { comment: fx.comment } : {}),
+            });
+          } else if (t === "resolve_blocker") {
+            const rm = Array.isArray(fx.remove_blocked_by_issue_ids) ? fx.remove_blocked_by_issue_ids.map(String) : [];
+            if (rm.length < 1) return fail(`Option "${oid}" ${t}: remove_blocked_by_issue_ids required.`);
+            Object.assign(base, { removeBlockedByIssueIds: rm });
+          } else if (t === "cancel_issue_tree") {
+            hasCancelTree = true;
+            Object.assign(base, { targetIssueId: target, staleness: "strict", reasonComment: String(fx.body_markdown ?? "") });
+            const rc = base.reasonComment as string;
+            if (!rc.trim()) return fail(`Option "${oid}" cancel_issue_tree: body_markdown is used as the required reasonComment.`);
+          } else if (t === "create_issue") {
+            const d = (fx.draft && typeof fx.draft === "object" ? fx.draft : null) as Record<string, unknown> | null;
+            if (!d || typeof d.title !== "string" || !d.title.trim()) {
+              return fail(`Option "${oid}" create_issue: draft.title required.`);
+            }
+            Object.assign(base, { draft: d });
+          }
+          effects.push(base);
+        }
+        if (hasCancelTree && style !== "destructive") {
+          return fail(`Option "${oid}": options containing cancel_issue_tree must set style="destructive".`);
+        }
+        options.push({
+          id: oid,
+          label,
+          ...(desc !== undefined ? { description: desc } : {}),
+          ...(style ? { style } : {}),
+          effects,
+        });
+      }
+      const body: Record<string, unknown> = {
+        title,
+        body: typeof args.body === "string" ? args.body : "",
+        options,
+        continuationPolicy: "wake_origin_agent",
+      };
+      const rawInputs = Array.isArray(args.inputs) ? (args.inputs as Array<Record<string, unknown>>) : [];
+      if (rawInputs.length > 4) return fail("Max 4 inputs per decision.");
+      if (rawInputs.length > 0) {
+        const inputIds = new Set<string>();
+        const inputs = [];
+        for (const inp of rawInputs) {
+          const iid = typeof inp?.id === "string" ? inp.id.trim() : "";
+          if (!iid || iid.length > 120) return fail("Each input needs an id (1-120 chars).");
+          if (inputIds.has(iid)) return fail(`Duplicate input id "${iid}".`);
+          inputIds.add(iid);
+          const il = typeof inp.label === "string" ? inp.label.trim() : "";
+          if (!il || il.length > 240) return fail(`Input "${iid}": label required (1-240 chars).`);
+          inputs.push({
+            id: iid,
+            label: il,
+            ...(typeof inp.placeholder === "string" && inp.placeholder.trim() ? { placeholder: inp.placeholder.trim() } : {}),
+            ...(inp.required === true ? { required: true } : {}),
+            ...(typeof inp.maxLength === "number" && inp.maxLength > 0 ? { maxLength: inp.maxLength } : {}),
+          });
+        }
+        body.inputs = inputs;
+      }
+      if (typeof args.expires_at === "string" && args.expires_at.trim()) body.expiresAt = args.expires_at.trim();
+      if (typeof args.idempotency_key === "string" && args.idempotency_key.trim()) body.idempotencyKey = args.idempotency_key.trim();
+      return safeCall("propose_decision", () => ctx.api.proposeDecision(ctx.companyId, body));
+    },
+  };
+}
+
+/** Upload a workspace file as an issue attachment. */
+function uploadAttachmentTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "upload_attachment",
+        description:
+          "Attach a file from the workspace to an issue (screenshots, logs, exports). Size cap is company-configured.",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: { type: "string", description: "Absolute path inside the workspace." },
+            issue_id: { type: "string", description: "Issue id. Omit to use the current issue." },
+          },
+          required: ["file_path"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const filePath = asString(args.file_path);
+      if (!filePath) return fail("file_path is required.");
+      const id = asString(args.issue_id, ctx.currentIssueId ?? "");
+      if (!id) return fail("No issue_id supplied and no current issue.");
+      return safeCall("upload_attachment", () => ctx.api.uploadAttachment(ctx.companyId, id, filePath));
+    },
+  };
+}
+
+/** Download an issue attachment into the workspace. */
+function downloadAttachmentTool(ctx: BuildToolsContext): Tool {
+  return {
+    schema: {
+      type: "function",
+      function: {
+        name: "download_attachment",
+        description: "Download an issue attachment's content to a file in the workspace.",
+        parameters: {
+          type: "object",
+          properties: {
+            attachment_id: { type: "string", description: "Attachment id (uuid), visible on the issue or in comments." },
+            dest_path: { type: "string", description: "Destination path inside the workspace." },
+          },
+          required: ["attachment_id", "dest_path"],
+        },
+      },
+    },
+    execute: async (args) => {
+      const attachmentId = asString(args.attachment_id);
+      const destPath = asString(args.dest_path);
+      if (!attachmentId || !destPath) return fail("attachment_id and dest_path are required.");
+      return safeCall("download_attachment", async () => {
+        const bytes = await ctx.api.downloadAttachment(attachmentId, destPath);
+        return ok({ bytesWritten: bytes, destPath });
+      });
+    },
+  };
+}
+
+
 export function buildTools(ctx: BuildToolsContext): Tool[] {
   return [
     getIssueTool(ctx),
@@ -1471,6 +1846,11 @@ export function buildTools(ctx: BuildToolsContext): Tool[] {
     issueDocumentTool(ctx),
     workProductTool(ctx),
     recoveryActionTool(ctx),
+    myInboxTool(ctx),
+    wakeAgentTool(ctx),
+    proposeDecisionTool(ctx),
+    uploadAttachmentTool(ctx),
+    downloadAttachmentTool(ctx),
   ];
 }
 
