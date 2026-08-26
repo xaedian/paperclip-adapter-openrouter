@@ -11,10 +11,9 @@
  * enableLocalExec is not explicitly false in the agent's adapterConfig.
  */
 
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import { readFileSync } from "node:fs";
 import path from "node:path";
+import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import type { Tool } from "./tools.js";
 
 const MAX_OUTPUT_BYTES = 200_000;
@@ -310,12 +309,14 @@ export function buildExecTools(opts: { workspaceRoot: string }): Tool[] {
         name: "run_command",
         description:
           "Execute a shell command inside your workspace directory (cmd.exe on Windows, /bin/sh elsewhere). " +
-          "Output is capped and long-running commands are killed at the timeout. Use for builds, tests, git, and project tooling.",
+          "Output is capped and long-running commands are killed at the timeout. Use for builds, tests, git, and project tooling. " +
+          "For long-running processes (dev servers, watchers), set background=true to avoid blocking.",
         parameters: {
           type: "object",
           properties: {
             command: { type: "string", description: "The shell command line to run." },
             timeout_sec: { type: "number", description: `Kill the command after this many seconds (default ${DEFAULT_TIMEOUT_SEC}, max ${MAX_TIMEOUT_SEC}).` },
+            background: { type: "boolean", description: "Set true for processes that never exit (dev servers, watchers). Returns immediately with the PID." },
           },
           required: ["command"],
         },
@@ -324,6 +325,30 @@ export function buildExecTools(opts: { workspaceRoot: string }): Tool[] {
     execute: async (args) => {
       const command = asString(args.command);
       if (!command) return fail("command is required.");
+
+      // Background mode: spawn detached, return immediately with the PID.
+      if (args.background === true) {
+        try {
+          const child = spawn(command, {
+            shell: true,
+            cwd: root,
+            windowsHide: true,
+            detached: true,
+            stdio: "ignore",
+            env: process.env,
+          });
+          child.unref();
+          return ok({
+            pid: child.pid,
+            background: true,
+            command,
+            note: `Process started in background (PID ${child.pid}). It keeps running after this call returns. Use 'taskkill /F /PID ${child.pid}' to stop it.`,
+          });
+        } catch (err) {
+          return fail(err instanceof Error ? err.message : String(err));
+        }
+      }
+
       const requested =
         typeof args.timeout_sec === "number" && args.timeout_sec > 0
           ? Math.min(Math.floor(args.timeout_sec), MAX_TIMEOUT_SEC)
