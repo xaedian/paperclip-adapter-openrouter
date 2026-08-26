@@ -13,6 +13,8 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 import type { Tool } from "./tools.js";
 

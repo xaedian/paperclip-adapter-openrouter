@@ -747,6 +747,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   messages.push({ role: "system", content: systemContent });
 
+  // Session persistence: inject previous conversation context so the agent
+  // maintains continuity across heartbeats instead of starting fresh.
+  const prevSession = ctx.runtime?.sessionParams as Record<string, unknown> | undefined;
+  if (prevSession && Array.isArray(prevSession.lastMessages) && prevSession.lastMessages.length > 0) {
+    const ctxLines = (prevSession.lastMessages as Array<{ role: string; content: string }>).map(function(m: any) { return "[" + m.role + "]: " + m.content; }).join("\n");
+    messages.push({ role: "user", content: "Previous conversation context (for continuity):\n" + ctxLines + "\n\nCurrent task follows." });
+  }
+
   // User prompt = Paperclip wake payload rendered as text.
   const resumedSession = !!ctx.runtime?.sessionId;
   let wakePrompt = "";
@@ -1127,7 +1135,10 @@ outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requ
     costUsd,
     sessionId: lastGenerationId ?? null,
     sessionDisplayId: lastGenerationId ?? null,
-    sessionParams: lastGenerationId ? { lastGenerationId } : null,
+    sessionParams: {
+      ...(lastGenerationId ? { lastGenerationId } : {}),
+      lastMessages: messages.slice(-6).map(function(m) { return { role: m.role, content: (m.content ?? "").slice(0, 500) }; }),
+    },
     summary: finalAssistantText.slice(0, 500),
   };
 }
