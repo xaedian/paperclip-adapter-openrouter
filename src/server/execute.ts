@@ -922,6 +922,13 @@ outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requ
       }
       if (text) finalAssistantText = text;
 
+      // Turn-budget awareness: tell the model when it is close to the cap
+      // so it wraps up (commit, post status) instead of being cut off mid-action.
+      const remaining = maxTurns - turn;
+      if (remaining === 5 || remaining === 2) {
+        messages.push({ role: "system", content: `[budget] Tool-turn budget nearly exhausted: ${remaining} round(s) left this run. Wrap up NOW: commit completed work, post a progress comment summarizing state and exact next steps for the next wake.` });
+      }
+
       // No tool calls => model is done.
       if (toolCalls.length === 0) {
         if (outcome.finishReason === "length" && !finalAssistantText.trim()) {
