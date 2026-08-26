@@ -139,13 +139,13 @@ function getConfigSchema(): AdapterConfigSchema {
         key: "environmentNotes",
         label: "Environment notes",
         type: "textarea",
-        hint: "Extra facts injected into every run's system prompt (machine quirks, tool paths). Fleet-wide tier: ~/.openrouter-adapter/config.json .environmentNotes",
+        hint: "Extra facts injected into every run's system prompt (machine quirks, tool paths). Fleet-wide defaults in adapter shared config .environmentNotes",
       },
       {
         key: "environmentVars",
         label: "Environment variables",
         type: "textarea",
-        hint: "One env var name per line; each is surfaced into the run Environment block when set on the host. Fleet-wide tier: ~/.openrouter-adapter/config.json .environmentVars",
+        hint: "One env var name per line; each is surfaced into the run Environment block when set on the host. Fleet-wide defaults in adapter shared config .environmentVars",
       },
       {
         key: "reasoning",

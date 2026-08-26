@@ -142,6 +142,10 @@ export interface OpenRouterModel {
     max_completion_tokens?: number;
     is_moderated?: boolean;
   };
+  per_request_limits?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  } | null;
 }
 
 export interface OpenRouterConfig {

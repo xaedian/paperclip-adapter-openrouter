@@ -48,6 +48,20 @@ import { PaperclipApi } from "./paperclip-api.js";
 import { buildTools, findTool, toolSchemas, type Tool } from "./tools.js";
 import { buildExecTools, buildEnvironmentBlock, resolveWorkspaceRoot } from "./exec-tools.js";
 import { getModelMaxCompletionTokens, resolveOpenRouterApiKey } from "./test.js";
+
+// Error-based limit discovery: when OpenRouter rejects max_tokens with a 400,
+// parse the actual limit and cache it for subsequent requests in this session.
+// Covers cases where the catalog is stale or providers self-report conservatively.
+const discoveredTokenLimits = new Map<string, number>();
+const TOKEN_LIMIT_ERROR_RE = /(?:max|max_tokens|completion)[^.]*?(\d[\d,]*)\s*(?:token|$)/i;
+
+/** Try to extract a numeric token limit from an OpenRouter 400 error body. */
+function parseTokenLimitFromError(message: string): number | null {
+  const m = TOKEN_LIMIT_ERROR_RE.exec(message);
+  if (!m?.[1]) return null;
+  const n = parseInt(m[1].replace(/,/g, ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 import { loadSkills, renderSkillsForPrompt } from "./skills.js";
 import {
   readPaperclipRuntimeSkillEntries,
@@ -234,18 +248,6 @@ class OpenRouterHttpError extends Error {
   }
 }
 
-
-/** Unified per-turn result regardless of streaming mode. */
-interface TurnOutcome {
-  generationId: string | null;
-  content: string;
-  reasoning: string;
-  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
-  finishReason: string | null;
-  usage: { prompt_tokens?: number; completion_tokens?: number } | null;
-  /** true when deltas were already emitted to the transcript during the stream. */
-  emittedDeltas: boolean;
-}
 
 function buildRequestBody(
   config: OpenRouterConfig,
@@ -908,7 +910,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const resolved = await resolveOpenRouterApiKey(config, { api, onLog });
     if (!resolved) {
       throw new Error(
-        "OpenRouter API key not found in any tier. Set agent adapterConfig.apiKey (or {{SECRET_REF}}), ~/.openrouter-adapter/config.json (.apiKey), or the OPENROUTER_API_KEY env var on the Paperclip server.",
+        "OpenRouter API key not found. Set agent adapterConfig.apiKey (or {{SECRET_REF}}), or grant OPENROUTER_API_KEY in Paperclip Secrets Manager.",
       );
     }
     apiKey = resolved.key;
@@ -944,15 +946,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   // Clamp the completion budget to the selected model's advertised maximum
   // (OpenRouter's public catalog). Unknown models keep the configured value.
+  // Also checks any previously discovered actual limits from error responses.
   let effectiveConfig: OpenRouterConfig & Record<string, unknown> = config;
   try {
-    const cap = await getModelMaxCompletionTokens(model);
+    const catalogCap = await getModelMaxCompletionTokens(model);
+    const discoveredCap = discoveredTokenLimits.get(model) ?? null;
+    // Use the higher of catalog vs discovered (discovered is empirical, catalog is advertised)
+    const cap = discoveredCap && catalogCap ? Math.max(discoveredCap, catalogCap) : discoveredCap ?? catalogCap;
     const requested = config.maxTokens ?? DEFAULT_MAX_TOKENS;
     if (cap && cap > 0 && requested > cap) {
       effectiveConfig = { ...config, maxTokens: cap };
       await writeRawStderr(
         onLog,
-        `[openrouter] clamped max_tokens ${requested} -> ${cap} (advertised maximum for ${model})`,
+        `[openrouter] clamped max_tokens ${requested} -> ${cap} (limit for ${model}${discoveredCap ? ", error-discovered" : ", catalog"})`,
       );
     }
   } catch {
@@ -980,21 +986,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       let outcome: TurnOutcome;
       try {
-          // Live transcript events -> heartbeat_run_events feed (drives the Tasks live view).
-  const _ignored = ctx.onEvent
-    ? async (entry: unknown) => {
-        try {
-          const ev = ctx.onEvent;
-        } catch {
-          // Live view feed only - never break the run over telemetry.
-        }
-      }
-    : undefined;
-
-outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requestTimeoutMs, onLog);
+        outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requestTimeoutMs, onLog);
       } catch (err) {
         const family = err instanceof OpenRouterHttpError ? err.family : null;
         const reason = err instanceof Error ? err.message : String(err);
+        // Error-based limit discovery: if OpenRouter rejects max_tokens with a 400,
+        // parse the actual limit and cache it for subsequent turns in this session.
+        if (err instanceof OpenRouterHttpError && err.status === 400) {
+          const parsed = parseTokenLimitFromError(reason);
+          if (parsed && parsed > 0) {
+            discoveredTokenLimits.set(model, parsed);
+            await writeRawStderr(
+              onLog,
+              `[openrouter] discovered actual max_tokens for ${model}: ${parsed} (from error response)`,
+            );
+          }
+        }
         runError = { message: reason, code: "openrouter_request_failed", family };
         stoppedReason = "error";
         break;

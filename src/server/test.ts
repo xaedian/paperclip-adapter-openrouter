@@ -139,7 +139,7 @@ export async function testEnvironment(
       level: "error",
       message: "No OpenRouter API key found in any tier",
       detail:
-        "Tiers checked: agent adapterConfig.apiKey, ~/.openrouter-adapter/config.json (.apiKey), OPENROUTER_API_KEY env var.",
+        "Tiers checked: agent adapterConfig.apiKey (or {{SECRET_REF}}), Paperclip Secrets Manager (OPENROUTER_API_KEY), OPENROUTER_API_KEY env var.",
       hint: "Get a key at https://openrouter.ai/keys",
     });
     return {
@@ -267,6 +267,7 @@ export interface OpenRouterCatalogEntry {
   id: string;
   label: string;
   maxCompletionTokens: number | null;
+  perRequestLimitTokens: number | null;
   contextLength: number | null;
 }
 
@@ -296,6 +297,10 @@ export async function fetchOpenRouterCatalog(force = false): Promise<OpenRouterC
         typeof m.top_provider?.max_completion_tokens === "number"
           ? m.top_provider.max_completion_tokens
           : null,
+      perRequestLimitTokens:
+        typeof m.per_request_limits?.completion_tokens === "number"
+          ? m.per_request_limits.completion_tokens
+          : null,
       contextLength: typeof m.context_length === "number" ? m.context_length : null,
     }));
     if (entries.length === 0) return catalogCache?.entries ?? [];
@@ -314,10 +319,14 @@ export async function fetchOpenRouterCatalog(force = false): Promise<OpenRouterC
   }
 }
 
-/** Look up a model's advertised max completion tokens (null when unknown). */
+/** Look up a model's advertised max completion tokens (null when unknown).
+ *  Prefers per_request_limits (more authoritative) over top_provider max. */
 export async function getModelMaxCompletionTokens(modelId: string): Promise<number | null> {
   const entries = await fetchOpenRouterCatalog();
-  return entries.find((e) => e.id === modelId)?.maxCompletionTokens ?? null;
+  const entry = entries.find((e) => e.id === modelId);
+  if (!entry) return null;
+  // per_request_limits is more authoritative when present (accounts for per-key restrictions)
+  return entry.perRequestLimitTokens ?? entry.maxCompletionTokens ?? null;
 }
 
 export async function listOpenRouterModels(): Promise<{ id: string; label: string }[]> {
