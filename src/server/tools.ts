@@ -315,16 +315,29 @@ function updateIssueStatusTool(ctx: BuildToolsContext): Tool {
           }
         }
       }
-      // Post the reason as a comment so the explanation is visible in-thread.
+      // THE ACTUAL STATUS CHANGE. (Regression fix: the v2.8.x gate rewrite
+      // dropped this call, so agents posted "Status set to..." comments while
+      // the real issue status never moved.)
+      let updateError: string | null = null;
+      try {
+        await ctx.api.updateIssue(id, { status });
+      } catch (err) {
+        updateError = err instanceof Error ? err.message : String(err);
+      }
+
       const reasonText = asString(args.reason);
-      const posted = await ctx.api
-        .addIssueComment(id, { body: `Status set to "${status}": ${reasonText ?? ""}`.trimEnd() })
-        .then(
-          () => true,
-          () => false,
-        );
-      void posted;
-      return safeCall("update_issue_status", () => Promise.resolve({ ok: true, status, issueId: id }));
+      if (!updateError) {
+        await ctx.api
+          .addIssueComment(id, { body: `Status set to "${status}": ${reasonText ?? ""}`.trimEnd() })
+          .catch(() => undefined);
+        return ok({ status, issueId: id });
+      }
+      if (reasonText) {
+        await ctx.api
+          .addIssueComment(id, { body: `Failed to set status "${status}": ${updateError}` })
+          .catch(() => undefined);
+      }
+      return fail(`update_issue_status failed on ${id}: ${updateError}`);
     },
   };
 }

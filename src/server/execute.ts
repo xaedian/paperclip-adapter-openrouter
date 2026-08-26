@@ -21,6 +21,8 @@
  */
 
 import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   normalizePaperclipWakePayload,
   renderPaperclipWakePrompt,
@@ -40,11 +42,18 @@ import {
   OPENROUTER_GENERATION_ENDPOINT,
   type OpenRouterConfig,
 } from "../index.js";
+
+const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 import { PaperclipApi } from "./paperclip-api.js";
 import { buildTools, findTool, toolSchemas, type Tool } from "./tools.js";
 import { buildExecTools, buildEnvironmentBlock, resolveWorkspaceRoot } from "./exec-tools.js";
 import { getModelMaxCompletionTokens, resolveOpenRouterApiKey } from "./test.js";
 import { loadSkills, renderSkillsForPrompt } from "./skills.js";
+import {
+  readPaperclipRuntimeSkillEntries,
+  resolvePaperclipDesiredSkillNames,
+  readPaperclipSkillMarkdown,
+} from "@paperclipai/adapter-utils/server-utils";
 import {
   emitAssistant,
   emitInit,
@@ -345,6 +354,7 @@ async function chatTurnStream(
   tools: Tool[],
   timeoutMs: number,
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>,
+  emitLive?: (entry: unknown) => Promise<void>,
 ): Promise<TurnOutcome> {
   let response: Response;
   try {
@@ -440,10 +450,12 @@ async function chatTurnStream(
       if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) {
         outcome.reasoning += delta.reasoning;
         await emitThinking(onLog, delta.reasoning, { delta: true });
+        if (emitLive) await emitLive({ kind: "thinking", ts: new Date().toISOString(), text: delta.reasoning, delta: true });
       }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         outcome.content += delta.content;
         await emitAssistant(onLog, delta.content, { delta: true });
+        if (emitLive) await emitLive({ kind: "assistant", ts: new Date().toISOString(), text: delta.content, delta: true });
       }
       if (delta.tool_calls?.length) mergeToolCallDeltas(acc, delta.tool_calls);
     }
@@ -467,11 +479,12 @@ async function chatTurnWithRetry(
   tools: Tool[],
   timeoutMs: number,
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>,
+  emitLive?: (entry: unknown) => Promise<void>,
 ): Promise<TurnOutcome> {
   const attempt = (): Promise<TurnOutcome> =>
     config.stream === false
       ? chatTurnNonStream(apiKey, config, messages, tools, timeoutMs)
-      : chatTurnStream(apiKey, config, messages, tools, timeoutMs, onLog);
+      : chatTurnStream(apiKey, config, messages, tools, timeoutMs, onLog, emitLive);
 
   try {
     return await attempt();
@@ -679,6 +692,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await writeRawStderr(onLog, `[openrouter] skill loading error (continuing): ${reason}`);
   }
 
+  // Paperclip-managed skills: desiredSkills synced by the host are materialized
+  // and referenced via config; read them and inject alongside external skills.
+  try {
+    const entries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
+    const desired = new Set(resolvePaperclipDesiredSkillNames(config, entries));
+    let injected = 0;
+    const blocks: string[] = [];
+    for (const entry of entries) {
+      if (!desired.has(entry.key)) continue;
+      const md = await readPaperclipSkillMarkdown(__moduleDir, entry.key);
+      if (!md) continue;
+      blocks.push("## Skill: " + entry.runtimeName + "\n\n" + md.trim());
+      injected++;
+    }
+    if (injected > 0) {
+      systemContent = systemContent + "\n\n" + blocks.join("\n\n---\n\n");
+      await emitSystem(onLog, "Injected " + injected + " Paperclip-managed skill(s)");
+    }
+  } catch (err) {
+    await writeRawStderr(onLog, "[openrouter] managed skill injection failed (continuing): " + (err instanceof Error ? err.message : String(err)));
+  }
+
   // Run-context pinning (mirrors openclaw-gateway): surface the resolved issue
   // in the prompt so the model never guesses which task it is working. Every
   // disposition/approval call should target this issue unless the payload says
@@ -846,7 +881,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       let outcome: TurnOutcome;
       try {
-        outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requestTimeoutMs, onLog);
+          // Live transcript events -> heartbeat_run_events feed (drives the Tasks live view).
+  const liveEmit = ctx.onEvent
+    ? async (entry: unknown) => {
+        try {
+          const ev = ctx.onEvent;
+          if (ev) await ev({ eventType: "transcript.entry", stream: "system", level: "info", payload: { entry } });
+        } catch {
+          // Live view feed only - never break the run over telemetry.
+        }
+      }
+    : undefined;
+
+outcome = await chatTurnWithRetry(apiKey, effectiveConfig, messages, tools, requestTimeoutMs, onLog, liveEmit);
       } catch (err) {
         const family = err instanceof OpenRouterHttpError ? err.family : null;
         const reason = err instanceof Error ? err.message : String(err);

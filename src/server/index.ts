@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Server module for the OpenRouter adapter.
  *
  * Exposes createServerAdapter(), the entry point Paperclip's adapter plugin
@@ -6,8 +6,8 @@
  * it imports this package's main entry and calls createServerAdapter(),
  * validating that the returned module has a "type".
  *
- * Everything is declared on the module itself — supportsLocalAgentJwt,
- * config schema, model discovery, skills, session codec — so no Paperclip
+ * Everything is declared on the module itself â€” supportsLocalAgentJwt,
+ * config schema, model discovery, skills, session codec â€” so no Paperclip
  * source patches are needed on any version that ships the external
  * adapter plugin store (>= 2026.40x).
  */
@@ -33,9 +33,9 @@ import { testEnvironment, listOpenRouterModels } from "./test.js";
 export { execute };
 export { testEnvironment, listOpenRouterModels };
 
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Model discovery
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Cached dynamic models; refreshed by refreshModels() or when stale. */
 let cachedModels: AdapterModel[] | null = null;
@@ -53,7 +53,7 @@ async function loadModels(force: boolean): Promise<AdapterModel[]> {
     cachedModelsAt = now;
     return discovered;
   }
-  // Discovery failed — fall back to the static list rather than nothing.
+  // Discovery failed â€” fall back to the static list rather than nothing.
   return cachedModels ?? fallbackModels;
 }
 
@@ -65,10 +65,10 @@ async function refreshModels(): Promise<AdapterModel[]> {
   return loadModels(true);
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Declarative config schema — lets the stock UI render our agent
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Declarative config schema â€” lets the stock UI render our agent
 // form without shipping any React components.
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function getConfigSchema(): AdapterConfigSchema {
   // NOTE: do NOT declare `model` or `instructionsFilePath` here - the stock
@@ -175,11 +175,11 @@ function getConfigSchema(): AdapterConfigSchema {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Session codec — persists lastGenerationId across heartbeats so the
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Session codec â€” persists lastGenerationId across heartbeats so the
 // run viewer shows a stable display id and future versions can chain
 // conversations.
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const sessionCodec: AdapterSessionCodec = {
   deserialize(raw) {
@@ -199,10 +199,10 @@ export const sessionCodec: AdapterSessionCodec = {
   },
 };
 
-// ─────────────────────────────────────────────────────────────────
-// detectModel — OpenRouter has no local CLI config to read; the env
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// detectModel â€” OpenRouter has no local CLI config to read; the env
 // var is the only meaningful source.
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function detectModel(): Promise<{
   model: string;
@@ -216,13 +216,13 @@ export async function detectModel(): Promise<{
   return { model: "openrouter/auto", provider: "openrouter", source: "default" };
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Skills — ephemeral mode. We scan an operator-managed root
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Skills â€” ephemeral mode. We scan an operator-managed root
 // (~/.openrouter-adapter/skills by default) and report each subdir
 // containing a SKILL.md as an external skill. Paperclip-managed
 // runtime skills (config.paperclipRuntimeSkills) are additionally
 // injected into the prompt by execute().
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function defaultSkillsRoot(): string {
   const home = process.env.HOME || process.env.USERPROFILE || ".";
@@ -279,9 +279,9 @@ export async function syncSkills(
   return listSkills(ctx);
 }
 
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Module assembly
-// ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function createServerAdapter(): ServerAdapterModule & { label: string } {
   return {
@@ -293,6 +293,7 @@ export function createServerAdapter(): ServerAdapterModule & { label: string } {
       testEnvironment(ctx)),
     supportsLocalAgentJwt: true,
     supportsInstructionsBundle: true,
+    requiresMaterializedRuntimeSkills: true,
     instructionsPathKey: "instructionsFilePath",
     models: fallbackModels,
     listModels,
