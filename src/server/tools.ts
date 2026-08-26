@@ -761,7 +761,8 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
         description:
           "Post an interaction onto an issue thread to hand control to a human or teammate. Kinds: " +
           "request_confirmation (ask the board to accept/reject your completed work or plan), ask_user_questions " +
-          "(ask questions before proceeding), suggest_tasks, request_checkbox_confirmation, request_item_verdicts. " +
+          "(ask structured multiple-choice questions before proceeding - requires the questions array), suggest_tasks, " +
+          "request_checkbox_confirmation, request_item_verdicts. " +
           "A pending interaction parks the issue until it is resolved - use this instead of guessing when you need " +
           "a decision. For plan approvals use kind='request_confirmation' with idempotencyKey " +
           "'confirmation:{issueId}:plan:{revisionId}' after updating the plan document.",
@@ -777,7 +778,8 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
             prompt: {
               type: "string",
               description:
-                "What you need confirmed/answered (required for request_confirmation and ask_user_questions). Max ~1000 chars.",
+                "What you need confirmed/answered. REQUIRED for request_confirmation; NOT used for ask_user_questions " +
+                "(use questions instead). Max ~1000 chars.",
             },
             title: { type: "string", description: "Short title for the interaction (max 240 chars)." },
             summary: { type: "string", description: "One-line context shown in the thread (max 1000 chars)." },
@@ -793,6 +795,52 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
               description:
                 "wake_assignee re-wakes you automatically when the interaction is resolved; none leaves the issue parked. Default depends on kind.",
             },
+            submit_label: {
+              type: "string",
+              description: "For ask_user_questions: label on the submit button (max 120 chars).",
+            },
+            questions: {
+              type: "array",
+              minItems: 1,
+              maxItems: 10,
+              description:
+                "REQUIRED for ask_user_questions: the structured questions. Each question needs id, prompt (max 500), " +
+                'selectionMode ("single" or "multi"), and 1-10 options with unique ids/labels. At most one option per ' +
+                'question may set free_text=true.',
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string", description: "Unique within this interaction (max 120 chars)." },
+                  prompt: { type: "string", description: "The question text (1-500 chars)." },
+                  help_text: { type: "string", description: "Optional extra context (max 1000 chars)." },
+                  selection_mode: {
+                    type: "string",
+                    enum: ["single", "multi"],
+                    description: "How many options may be chosen. Default single.",
+                  },
+                  required: { type: "boolean", description: "Whether an answer is mandatory." },
+                  options: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 10,
+                    items: {
+                      type: "object",
+                      properties: {
+                        id: { type: "string", description: "Unique within the question (max 120 chars)." },
+                        label: { type: "string", description: "Option text (1-120 chars)." },
+                        description: { type: "string", description: "Optional explanation (max 500 chars)." },
+                        free_text: {
+                          type: "boolean",
+                          description: "Reveals an inline text field when chosen; at most ONE per question.",
+                        },
+                      },
+                      required: ["id", "label"],
+                    },
+                  },
+                },
+                required: ["id", "prompt", "options"],
+              },
+            },
           },
           required: ["kind"],
         },
@@ -806,8 +854,57 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
         return fail(`Invalid kind "${kind}". Valid: ${INTERACTION_KINDS.join(", ")}`);
       }
       const prompt = asString(args.prompt);
-      if ((kind === "request_confirmation" || kind === "ask_user_questions") && !prompt) {
+      if (kind === "request_confirmation" && !prompt) {
         return fail(`prompt is required for kind="${kind}".`);
+      }
+      if (kind === "ask_user_questions") {
+        if (prompt) {
+          return fail('ask_user_questions does not take prompt - put your questions in the questions array.');
+        }
+        const rawQ = Array.isArray(args.questions) ? args.questions : [];
+        if (rawQ.length === 0) {
+          return fail(
+            'questions array is required for ask_user_questions: [{"id","prompt",options:[{"id","label"}],selection_mode}]',
+          );
+        }
+        if (rawQ.length > 10) return fail("At most 10 questions per interaction.");
+        const seenQ = new Set<string>();
+        for (const q of rawQ as Array<Record<string, unknown>>) {
+          const qid = typeof q?.id === "string" ? q.id.trim() : "";
+          if (!qid || qid.length > 120) return fail("Each question needs an id (1-120 chars).");
+          if (seenQ.has(qid)) return fail(`Duplicate question id "${qid}" - ids must be unique.`);
+          seenQ.add(qid);
+          const qp = typeof q?.prompt === "string" ? q.prompt.trim() : "";
+          if (!qp || qp.length > 500) return fail(`Question "${qid}" needs a prompt (1-500 chars).`);
+          const help = q.help_text;
+          if (help !== undefined && !(typeof help === "string" && help.length <= 1000)) {
+            return fail(`Question "${qid}": help_text max 1000 chars.`);
+          }
+          const mode = q.selection_mode === undefined ? "single" : q.selection_mode;
+          if (mode !== "single" && mode !== "multi") {
+            return fail(`Question "${qid}": selection_mode must be "single" or "multi".`);
+          }
+          const opts = Array.isArray(q.options) ? q.options : [];
+          if (opts.length < 1 || opts.length > 10) {
+            return fail(`Question "${qid}" needs 1-10 options.`);
+          }
+          const seenO = new Set<string>();
+          let freeText = 0;
+          for (const o of opts as Array<Record<string, unknown>>) {
+            const oid = typeof o?.id === "string" ? o.id.trim() : "";
+            if (!oid || oid.length > 120) return fail(`Question "${qid}": each option needs an id (1-120 chars).`);
+            if (seenO.has(oid)) return fail(`Question "${qid}": duplicate option id "${oid}".`);
+            seenO.add(oid);
+            const label = typeof o?.label === "string" ? o.label.trim() : "";
+            if (!label || label.length > 120) return fail(`Question "${qid}" option "${oid}": label required (1-120 chars).`);
+            const desc = o.description;
+            if (desc !== undefined && !(typeof desc === "string" && desc.length <= 500)) {
+              return fail(`Question "${qid}" option "${oid}": description max 500 chars.`);
+            }
+            if (o.free_text === true) freeText += 1;
+          }
+          if (freeText > 1) return fail(`Question "${qid}": at most one option may set free_text=true.`);
+        }
       }
       // Dedupe guard: don't stack duplicate pendings on the same issue.
       try {
@@ -830,10 +927,30 @@ function issueInteractionTool(ctx: BuildToolsContext): Tool {
       const body: Record<string, unknown> = {
         kind,
         payload: {
-          version: 1,
+          version: 1 as const,
           ...(prompt ? { prompt } : {}),
         },
       };
+      if (kind === "ask_user_questions") {
+        body.payload = {
+          version: 1,
+          ...(args.title ? { title: asString(args.title) } : {}),
+          ...(args.submit_label ? { submitLabel: asString(args.submit_label) } : {}),
+          questions: (args.questions as Array<Record<string, unknown>>).map((q) => ({
+            id: (q.id as string).trim(),
+            prompt: (q.prompt as string).trim(),
+            ...(q.help_text !== undefined ? { helpText: q.help_text } : {}),
+            selectionMode: q.selection_mode === "multi" ? "multi" : "single",
+            ...(typeof q.required === "boolean" ? { required: q.required } : {}),
+            options: (q.options as Array<Record<string, unknown>>).map((o) => ({
+              id: (o.id as string).trim(),
+              label: (o.label as string).trim(),
+              ...(o.description !== undefined ? { description: o.description } : {}),
+              ...(o.free_text === true ? { freeText: true } : {}),
+            })),
+          })),
+        };
+      }
       // title/summary/idempotencyKey are top-level fields on the create schema.
       if (args.title) body.title = asString(args.title);
       if (args.summary) body.summary = asString(args.summary);

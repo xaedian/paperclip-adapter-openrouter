@@ -1,6 +1,6 @@
 {
   "name": "@xaedian/paperclip-adapter-openrouter",
-  "version": "2.13.0",
+  "version": "2.13.1",
   "description": "OpenRouter adapter for Paperclip - 300+ AI models (free & paid) via a single API key. External adapter plugin, no Paperclip source patches required.",
   "license": "MIT",
   "author": "xaedian",
