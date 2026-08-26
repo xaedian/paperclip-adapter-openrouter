@@ -631,7 +631,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         try {
           const fsMk = await import("node:fs/promises");
           await fsMk.mkdir(wsRoot, { recursive: true });
-          tools = tools.concat(buildExecTools({ workspaceRoot: wsRoot }));
+          tools = tools.concat(buildExecTools({ workspaceRoot: wsRoot, runId: ctx.runId, onLog }));
           await writeRawStderr(onLog, `[openrouter] local exec tools enabled (workspace ${wsRoot})`);
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);

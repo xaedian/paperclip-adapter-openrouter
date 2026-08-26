@@ -50,4 +50,39 @@ function parseStdoutLine(line, ts) {
   return [{ kind: "stdout", ts: ts, text: trimmed }];
 }
 
-module.exports = { parseStdoutLine };
+
+function createStdoutParser() {
+  var awaitingResult = false;
+  var lastToolUseId = "";
+  return {
+    parseLine: function (line, ts) {
+      var trimmed = line.trim();
+      if (!trimmed) return [];
+      if (trimmed.charAt(0) === "{") {
+        try {
+          var entry = JSON.parse(trimmed);
+          if (
+            entry &&
+            typeof entry === "object" &&
+            !Array.isArray(entry) &&
+            KNOWN_KINDS.indexOf(entry.kind) !== -1 &&
+            typeof entry.ts !== "undefined"
+          ) {
+            if (entry.kind === "tool_result") awaitingResult = false;
+            return [Object.assign({}, entry, { ts: ts || entry.ts })];
+          }
+        } catch (err) {}
+      }
+      if (awaitingResult) {
+        awaitingResult = false;
+        return [{ kind: "tool_result", ts: ts, toolUseId: lastToolUseId, content: trimmed, isError: false }];
+      }
+      return [{ kind: "assistant", ts: ts, text: trimmed }];
+    },
+    reset: function () {
+      awaitingResult = false;
+    },
+  };
+}
+
+module.exports = { parseStdoutLine, createStdoutParser };

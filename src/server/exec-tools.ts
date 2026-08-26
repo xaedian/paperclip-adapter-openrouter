@@ -204,7 +204,7 @@ function asString(v: unknown, fallback = ""): string {
   return typeof v === "string" && v.length > 0 ? v : fallback;
 }
 
-export function buildExecTools(opts: { workspaceRoot: string }): Tool[] {
+export function buildExecTools(opts: { workspaceRoot: string; runId: string; onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>; }): Tool[] {
   const root = path.resolve(opts.workspaceRoot);
 
   const readTool: Tool = {
@@ -356,13 +356,26 @@ export function buildExecTools(opts: { workspaceRoot: string }): Tool[] {
           ? Math.min(Math.floor(args.timeout_sec), MAX_TIMEOUT_SEC)
           : DEFAULT_TIMEOUT_SEC;
       try {
-        const result = await runCommand(command, root, requested);
+        const isWin = process.platform === "win32";
+        const shell = isWin ? "cmd.exe" : "/bin/sh";
+        const flag = isWin ? "/c" : "-c";
+        const result = await runChildProcess(
+          opts.runId,
+          shell,
+          [flag, command],
+          {
+            cwd: root,
+            env: process.env as Record<string, string>,
+            timeoutSec: requested,
+            graceSec: 5,
+            onLog: opts.onLog,
+          },
+        );
         return ok({
           command,
           cwd: root,
           exitCode: result.exitCode,
           timedOut: result.timedOut,
-          truncated: result.truncated,
           stdout: result.stdout,
           stderr: result.stderr,
         });
